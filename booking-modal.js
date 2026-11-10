@@ -10,12 +10,10 @@
   const Svc = global.SapService;
 
   const COURSE_OPTIONS = [
-    { value: "AD Beg", label: "Adult Beginner (AD Beg)" },
-    { value: "BCE", label: "British Council English (BCE)" },
-    { value: "IELTS", label: "IELTS Preparation" },
-    { value: "EY1", label: "Early Years 1 (EY1)" },
-    { value: "EY2", label: "Early Years 2 (EY2)" },
-    { value: "EY3", label: "Early Years 3 (EY3)" },
+    { value: "EY", label: "Early Years (General • EY)" },
+    { value: "EY2", label: "Early Years 2 (Ducks • 4y • EY2)" },
+    { value: "EY3", label: "Early Years 3 (Owls • 5y • EY3)" },
+    { value: "EY1", label: "Early Years 1 (3y • EY1)" },
     { value: "PStA", label: "Primary Starter A (PStA)" },
     { value: "PStB", label: "Primary Starter B (PStB)" },
     { value: "PP1", label: "Primary Plus 1 (PP1)" },
@@ -38,6 +36,9 @@
     { value: "USB2.1", label: "Upper Secondary Plus B2.1 (USB2.1)" },
     { value: "USB2.2", label: "Upper Secondary Plus B2.2 (USB2.2)" },
     { value: "USC1", label: "Upper Secondary Plus C1 (USC1)" },
+    { value: "AD Beg", label: "Adult Beginner (AD Beg)" },
+    { value: "BCE", label: "British Council English (BCE)" },
+    { value: "IELTS", label: "IELTS Preparation" },
   ];
 
   const EVENT_TYPES = [
@@ -257,6 +258,17 @@
       return () => window.removeEventListener("keydown", onKey);
     }, [bookingBusyId]);
 
+    function handleCourseChange(val) {
+      setCourseSuffix(val);
+      if (val === "EY2" && (!subLevelFilter || subLevelFilter === "Owls")) {
+        setSubLevelFilter("Ducks");
+      } else if (val === "EY3" && (!subLevelFilter || subLevelFilter === "Ducks")) {
+        setSubLevelFilter("Owls");
+      } else if (val === "EY" && (subLevelFilter === "Ducks" || subLevelFilter === "Owls")) {
+        setSubLevelFilter("");
+      }
+    }
+
     // Auto-fill course + sub-level from the student's recommended level
     useEffect(() => {
       if (!profile || !model) return;
@@ -265,8 +277,13 @@
       const cObj = centres.find((c) => c.key === defaultKey) || centres[0];
       const targetBookingLvl = model.recommendedBookingLevel || model.level;
       const resolved = SAPC.resolveSapCourseForLevel(cObj ? cObj.code : "AGU", targetBookingLvl, model.isAdult) || {};
-      setCourseSuffix(resolved.courseSuffix || (model.isAdult ? "BCE" : "PP1"));
-      setSubLevelFilter(resolved.subLevelFilter || "");
+      const fallbackSuffix = model.isAdult
+        ? "BCE"
+        : (model.isEarlyYears
+          ? (model.age && (model.age.academicYears >= 5 || model.age.years >= 5) ? "EY3" : "EY2")
+          : "PP1");
+      setCourseSuffix(resolved.courseSuffix || fallbackSuffix);
+      setSubLevelFilter(resolved.subLevelFilter || (model.isEarlyYears ? (fallbackSuffix === "EY3" ? "Owls" : "Ducks") : ""));
       if (pricing && String(pricing.adultCourseId || "").toLowerCase() === "bce") {
         const cr = Number(pricing.credits) || 20;
         setEventTypeFilter({ 10: "10L", 20: "20L", 40: "40L", 60: "60L" }[cr] || "");
@@ -346,10 +363,11 @@
       try {
         const allRes = await Svc.searchAllBranchesSchedules({
           studentId,
-          levelStr: model ? (model.recommendedBookingLevel || model.level) : "",
+          levelStr: courseSuffix || (model ? (model.recommendedBookingLevel || model.level) : ""),
           isAdult: model ? model.isAdult : true,
           year,
           eventType: "", // BCE packages filtered client-side by class name
+          subLevelFilter,
           onStep: (msg) => setStepMsg(msg),
           onBranchResult: (centreKey, bRes) => {
             if (!bRes || !bRes.centre) return;
@@ -645,7 +663,7 @@
 
               <div>
                 ${label("Course")}
-                <select className="input !h-7 text-[11.5px]" value=${courseSuffix} onChange=${(e) => setCourseSuffix(e.target.value)}>
+                <select className="input !h-7 text-[11.5px]" value=${courseSuffix} onChange=${(e) => handleCourseChange(e.target.value)}>
                   ${(model && model.isAdult
                     ? COURSE_OPTIONS.filter((o) => ["AD Beg", "BCE", "IELTS"].includes(o.value))
                     : COURSE_OPTIONS
@@ -663,7 +681,7 @@
               <div className="grid grid-cols-[1fr_80px] gap-1.5">
                 <div>
                   ${label("Class description filter")}
-                  <input className="input !h-7 text-[11.5px]" placeholder="e.g. Beg B" value=${subLevelFilter} onChange=${(e) => setSubLevelFilter(e.target.value)} />
+                  <input className="input !h-7 text-[11.5px]" placeholder="e.g. Ducks, Owls, Beg B" value=${subLevelFilter} onChange=${(e) => setSubLevelFilter(e.target.value)} />
                 </div>
                 <div>
                   ${label("Year")}
@@ -824,6 +842,7 @@
                         return html`<span
                           key=${getCartKey(cc) + "_" + idx}
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[6px] bg-white border border-emerald-300 text-slate-800 text-[11px] shadow-2xs"
+                          title=${cc.className}
                         >
                           ${tBadge && html`<span className="font-mono font-bold text-amber-700 bg-amber-100 px-1 rounded text-[10px]">${tBadge}</span>`}
                           <span className="font-semibold truncate max-w-[210px]">${fmtClass(cc)}</span>
@@ -957,7 +976,7 @@
                         return html`<tr key=${itemKey + "_" + i} style=${inCart ? { background: "rgba(16, 185, 129, 0.07)" } : full ? { background: "#fafafa" } : null}>
                           <td className="whitespace-nowrap"><span className="pill pill-blue !text-[10px] !py-0 !px-1.5 font-medium">${cls._centreName || cls.location || "—"}</span></td>
                           <td>
-                            <div className="font-semibold select-text text-[11.5px] text-slate-800 leading-tight">${displayClsName}</div>
+                            <div className="font-semibold select-text text-[11.5px] text-slate-800 leading-tight" title=${cls.className}>${displayClsName}</div>
                             ${cls.location && html`<div className="text-[10px] text-slate-400 font-mono mt-0.5">${cls.location}</div>`}
                           </td>
                           <td className="whitespace-nowrap">
@@ -1027,9 +1046,9 @@
             <div className="text-[12.5px] space-y-1.5">
               <div><span className="muted">Student:</span> <b>${SAPC.formatStudentName(profile.fullName)}</b> (${studentId})</div>
               ${confirmClasses.length === 1 ? html`
-                <div><span className="muted">Class:</span> <b>${fmtClass(confirmClasses[0])}</b></div>
-                <div><span className="muted">Dates:</span> ${confirmClasses[0].startDate} → ${confirmClasses[0].endDate}</div>
-                <div><span className="muted">Branch:</span> ${confirmClasses[0]._centreName || "—"}</div>
+                <div><span className="muted">Class:</span> <b className="text-slate-900 select-text font-bold" title=${confirmClasses[0].className}>${fmtClass(confirmClasses[0])}</b></div>
+                <div><span className="muted">Dates:</span> <span className="font-medium text-slate-800">${confirmClasses[0].startDate} → ${confirmClasses[0].endDate}</span></div>
+                <div><span className="muted">Branch:</span> <span className="font-medium text-slate-800">${confirmClasses[0]._centreName || "—"}</span></div>
               ` : html`
                 <div className="pt-1">
                   <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Selected Classes (${confirmClasses.length}):</div>
@@ -1039,9 +1058,9 @@
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="text-[10px] font-bold text-slate-400">#${idx + 1}</span>
                           ${getTermText(cc) && html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${getTermText(cc)}</span>`}
-                          <b className="truncate text-slate-800">${fmtClass(cc)}</b>
+                          <b className="truncate text-slate-900 select-text" title=${cc.className}>${fmtClass(cc)}</b>
                         </div>
-                        <span className="text-[11px] text-slate-500 num whitespace-nowrap">${cc.startDate} → ${cc.endDate}</span>
+                        <span className="text-[11px] text-slate-600 num whitespace-nowrap">${cc.startDate} → ${cc.endDate}</span>
                       </div>
                     `)}
                   </div>

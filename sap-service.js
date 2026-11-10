@@ -640,15 +640,22 @@
         const noteDateNum = dNotes.detectedLevelDateNum || 0;
         const recDateNum = dRec.latestRecDateNum || 0;
         let latestBookingDateNum = 0;
+        let prebookedPTBooking = null;
         if (Array.isArray(currentBookings)) {
           currentBookings.forEach((b) => {
             const desc = `${b.courseCode || ""} ${b.courseDescription || ""} ${b.className || ""}`;
-            if (/ylcon|adcon|consultation|placement|\bpt\b|assessment/i.test(desc)) return;
-            if (String(b.status || "").toLowerCase().includes("cancel")) return;
+            const s = String(b.status || "").toLowerCase();
+            const isPT = /ylcon|adcon|consultation|placement|\bpt\b|assessment/i.test(desc);
+            if (isPT && /prebook|reserv|pending|wait/i.test(s) && !s.includes("cancel")) {
+              if (!prebookedPTBooking) prebookedPTBooking = b;
+            }
+            if (isPT) return;
+            if (s.includes("cancel")) return;
             const dNum = SAP.parseSapDateToNum(b.bookingDate) || SAP.parseSapDateToNum(b.startDate);
             if (dNum > latestBookingDateNum) latestBookingDateNum = dNum;
           });
         }
+        const hasPrebookedPT = Boolean(prebookedPTBooking);
 
         // Chronological check: if a dated Note is strictly newer than both RecLevel and the latest Course Booking,
         // or if a Note on the same/newer date specifies a level override (even a lower level or No Level), follow the newest date!
@@ -659,18 +666,50 @@
           noteDateNum > latestBookingDateNum
         );
 
-        const rawNoLevelInNotes = Boolean(
-          dNotes.isNoLevel ||
-          /no\s*level|راسب|ساقط/i.test(dNotes.detectedLevel || "") ||
-          /no\s*level|راسب|ساقط/i.test(outside) ||
-          (Array.isArray(dNotes.notesList) && dNotes.notesList.some((n) => /\bno\s*level\b|راسب|ساقط/i.test(n.title || n.text || "")))
-        );
-        const isStudentNoLevel = Boolean(
-          (noteIsNewest && dNotes.isNoLevel) ||
-          (rawNoLevelInNotes && !hasSpecificOutsideLevel && !hasSpecificRecLevel && latestBookingDateNum === 0)
+        const studentDob = dDet.dob || row.dob || "";
+        const kb = global.BCKnowledgeBase || global.bcKnowledgeBase;
+        const studentAge = studentDob && kb ? kb.calculateDetailedAge(studentDob) : null;
+        const isStudentEarlyYears = Boolean(
+          studentAge &&
+          (studentAge.stageCategory === "YL" || studentAge.isEarlyYears) &&
+          (studentAge.academicYears <= 5 || studentAge.years <= 5)
         );
 
-        if (noteIsNewest) {
+        // Only notes that explicitly state failure/no level count as failed PT.
+        // "No level assigned" in the SAP header is merely an unassigned placeholder, NOT a failed PT!
+        const outsideExplicitlyFailed = Boolean(
+          outside &&
+          !/no\s*level\s*assigned/i.test(outside) &&
+          /no\s*level|راسب|ساقط|fail|did not pass/i.test(outside)
+        );
+        const rawNoLevelInNotes = Boolean(
+          !isStudentEarlyYears &&
+          !hasPrebookedPT && (
+            dNotes.isNoLevel ||
+            /no\s*level|راسب|ساقط|fail|did not pass/i.test(dNotes.detectedLevel || "") ||
+            outsideExplicitlyFailed ||
+            (Array.isArray(dNotes.notesList) && dNotes.notesList.some((n) => /\bno\s*level\b|راسب|ساقط|fail|did not pass/i.test(n.title || n.text || "")))
+          )
+        );
+        const isStudentNoLevel = Boolean(
+          !isStudentEarlyYears &&
+          !hasPrebookedPT && (
+            (noteIsNewest && dNotes.isNoLevel) ||
+            (rawNoLevelInNotes && !hasSpecificOutsideLevel && !hasSpecificRecLevel && latestBookingDateNum === 0)
+          )
+        );
+
+        if (isStudentEarlyYears) {
+          const acadYrs = (studentAge && studentAge.academicYears) || (studentAge && studentAge.years) || 4;
+          const eyLvl = acadYrs >= 5 ? "Early Years 3 (Owls)" : "Early Years 2 (Ducks)";
+          finalLevel = (hasSpecificOutsideLevel && /ducks|owls/i.test(outside)) ? outside : eyLvl;
+          detectedFromNote = null;
+          levelSource = "Age Placement (Direct Enrollment)";
+        } else if (hasPrebookedPT) {
+          finalLevel = "Pending PT Payment (Unpaid)";
+          detectedFromNote = null;
+          levelSource = "Placement Test (Awaiting Payment)";
+        } else if (noteIsNewest) {
           finalLevel = dNotes.detectedLevel;
           detectedFromNote = dNotes.detectedLevel;
           levelSource = `Advising Note (${dNotes.detectedLevelDate || "Latest"})`;
@@ -719,6 +758,9 @@
           detectedLevelDate: dNotes.detectedLevelDate || "",
           detectedLevelDateNum: noteDateNum,
           isNoLevel: isStudentNoLevel,
+          hasPrebookedPT,
+          prebookedPT: prebookedPTBooking || null,
+          isEarlyYears: isStudentEarlyYears,
           recLevels: dRec.recLevels || [],
           latestRecLevel: dRec.latestRecLevel || null,
           latestRecDate: dRec.latestRecDate || "",
@@ -1232,18 +1274,24 @@
     const allClasses = SAP.parseRegistrationClasses(sRes.body).map((c) => ({ ...c, firstVisibleIndex: 0 }));
     const messages = SAP.parseSapMessages(sRes.body);
 
-    // Fetch additional rows only if table actually has more unrendered rows (step by 15 for turbo speed)
-    const rowCountMatch = sRes.body.match(/aria-rowcount="(\d+)"/i)
-      || sRes.body.match(/iContentRowCount="(\d+)"/i)
-      || sRes.body.match(/data-itemcount="(\d+)"/i);
-    const totalRowCount = rowCountMatch ? Math.max(parseInt(rowCountMatch[1], 10) - 1, 0) : 0;
-    const maxTarget = totalRowCount > 0 ? Math.min(totalRowCount, 80) : 40;
+    // Accurately detect total row count from SAP Web Dynpro table (crc attribute e.g. crc="71")
+    const crcMatch =
+      (rs.controls.scheduleTableId ? sRes.body.match(new RegExp(`id="${rs.controls.scheduleTableId}"[^>]*crc="(\\d+)"`, "i")) : null) ||
+      sRes.body.match(/id="(?:WD[0-9A-F]+)"[^>]+(?:ct="STCS"|ct="ST5"|ct="ST")[^>]*\scrc="(\d+)"/i) ||
+      sRes.body.match(/crc="(\d+)"/i) ||
+      sRes.body.match(/aria-rowcount="(\d+)"/i) ||
+      sRes.body.match(/iContentRowCount="(\d+)"/i) ||
+      sRes.body.match(/data-itemcount="(\d+)"/i);
+    const totalRowCount = crcMatch ? parseInt(crcMatch[1], 10) : 0;
+    const maxTarget = totalRowCount > 0 ? totalRowCount : 150;
 
     let didScroll = false;
     if (allClasses.length > 0 && (totalRowCount === 0 || allClasses.length < totalRowCount)) {
       const seenNames = new Set(allClasses.map((c) => `${c.className}|${c.startDate}`));
-      for (let idx = allClasses.length; idx < maxTarget; idx += 15) {
-        onStep && onStep(`Loading full yearly schedules from SAP (${allClasses.length} classes loaded)…`);
+      // Step size MUST strictly match the visible viewport (usually 5 rows) so no months/rows in between are skipped!
+      const windowStep = Math.max(Math.min(allClasses.length, 5), 5);
+      for (let idx = windowStep; idx < maxTarget; idx += windowStep) {
+        onStep && onStep(`Loading full yearly schedules from SAP (${allClasses.length} of ${totalRowCount || 'all'} classes)…`);
         const scrollQ =
           `SapTable_VerticalScroll~E002Id~E004${rs.controls.scheduleTableId || "WD0592"}~E005FirstVisibleItemIndex~E004${idx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
           `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
@@ -1303,7 +1351,7 @@
   /**
    * Searches across ALL 6 British Council Egypt Teaching Centres for the student's recommended level!
    */
-  async function searchAllBranchesSchedules({ studentId, levelStr, isAdult = true, year = "2026", eventType = "", onBranchResult, onStep }) {
+  async function searchAllBranchesSchedules({ studentId, levelStr, isAdult = true, year = "2026", eventType = "", subLevelFilter = "", onBranchResult, onStep }) {
     const resultsByBranch = {};
     for (const centre of SAP.TEACHING_CENTRES) {
       const resolved = SAP.resolveSapCourseForLevel(centre.code, levelStr, isAdult);
@@ -1315,7 +1363,7 @@
           courseCode: resolved.courseCode,
           year,
           eventType,
-          subLevelFilter: resolved.subLevelFilter,
+          subLevelFilter: subLevelFilter !== undefined && subLevelFilter !== "" ? subLevelFilter : resolved.subLevelFilter,
           onStep,
         });
         resultsByBranch[centre.key] = {
@@ -1336,6 +1384,35 @@
       }
     }
     return resultsByBranch;
+  }
+
+  function extractClassSearchHint(className) {
+    const s = String(className || "").trim();
+    // 1. BCE Month pattern: e.g. "Sep26", "Jan26", "Oct26", "Mar 27", "Nov 26"
+    const bceMonth = s.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*\d{0,2}\b/i);
+    if (bceMonth) return bceMonth[0].replace(/\s+/g, "");
+
+    // 2. Beginner sub-level: e.g. "Beg A", "Beg B", "Beg C", "Beg D"
+    const begMatch = s.match(/\b(Beg\s+[A-E])\b/i);
+    if (begMatch) return begMatch[1];
+
+    // 3. Early Years: Ducks or Owls
+    if (/\bducks\b/i.test(s)) return "Ducks";
+    if (/\bowls\b/i.test(s)) return "Owls";
+
+    // 4. Term token: e.g. "T1", "T2", "T3"..."T11"
+    const termMatch = s.match(/\b(T\d{1,2})\b/i);
+    if (termMatch) return termMatch[1];
+
+    // 5. CEFR level: e.g. "B1.1", "B2.2", "A2", "B1"
+    const cefrMatch = s.match(/\b([A-C][12](?:\.[12])?)\b/i);
+    if (cefrMatch) return cefrMatch[1];
+
+    // 6. Day pattern: e.g. "Sun/Wed", "Mon/Wed", "Tue/Thu", "Fri/Sat"
+    const dayMatch = s.match(/\b(Sun|Mon|Tue|Wed|Thu|Fri|Sat)(?:\/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat))?\b/i);
+    if (dayMatch) return dayMatch[0];
+
+    return "";
   }
 
   /**
@@ -1433,12 +1510,23 @@
         // 1. Determine exact course code for this specific item
         let itemCourseCode = item._courseCode;
         if (!itemCourseCode) {
+          const centreObj = SAP.TEACHING_CENTRES.find((c) => c.key === (item._centreKey || rs.centreKey))
+            || SAP.TEACHING_CENTRES.find((c) => c.key === rs.centreKey)
+            || SAP.TEACHING_CENTRES[0];
+          const branchPrefix = (centreObj && centreObj.code) || "AGU";
+
           if (/\b(AD Beg|Beginner|Beg\s+[A-D])\b/i.test(item.className)) {
-            const branchPrefix = (rs.centreKey === "05001354" || /\b(BSA|ALX)\b/i.test(item.className)) ? "ALX" : (primaryCourseCode.split("-")[0] || "AGU");
             itemCourseCode = `${branchPrefix}-AD Beg`;
-          } else if (/\bBCE\b/i.test(item.className)) {
-            const branchPrefix = (rs.centreKey === "05001354" || /\b(BSA|ALX)\b/i.test(item.className)) ? "ALX" : (primaryCourseCode.split("-")[0] || "AGU");
+          } else if (/\b(?:BCE|British\s*Council\s*English|\d{1,2}L(?:\s*\/\s*\d{1,2}M)?)\b/i.test(item.className)) {
             itemCourseCode = `${branchPrefix}-BCE`;
+          } else if (/\bIELTS\b/i.test(item.className)) {
+            itemCourseCode = `${branchPrefix}-IELTS`;
+          } else if (/\b(Owls|EY3)\b/i.test(item.className)) {
+            itemCourseCode = `${branchPrefix}-EY3`;
+          } else if (/\b(Ducks|EY2)\b/i.test(item.className)) {
+            itemCourseCode = `${branchPrefix}-EY2`;
+          } else if (/\b(EY1)\b/i.test(item.className)) {
+            itemCourseCode = `${branchPrefix}-EY1`;
           } else {
             itemCourseCode = primaryCourseCode;
           }
@@ -1504,8 +1592,7 @@
           rs.popupOpen = true;
         }
 
-        // Always filter the open popup by exact class name (*className*) so the target class is at rowIndex=1
-        // with a 100% fresh triggerCellId and okPopupBtn (eliminates any scroll offset mismatch)
+        // Filter open popup by smart class hint (e.g. *Sep26*, *Jan26*, *Beg B*, *T1*) so target class is at rowIndex=1
         const curCtl = rs.controls;
         onStep && onStep(
           itemsToBook.length > 1
@@ -1523,21 +1610,35 @@
             `ComboBox_Change~E002Id~E004${curCtl.yearInputId}~E005Value~E004${SAP.sapEscape(itemYear)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
           );
         }
+        // Always explicitly reset/pass eventType so stale BCE package filters don't block general/Beginner classes
+        if (curCtl.eventTypeInputId) {
+          const evVal = item.eventType || "";
+          searchEvents.push(
+            `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004${SAP.sapEscape(evVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+          );
+        }
+        if (curCtl.sessionInputId) {
+          searchEvents.push(
+            `ComboBox_Change~E002Id~E004${curCtl.sessionInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+          );
+        }
+        if (curCtl.academicLevelInputId) {
+          searchEvents.push(
+            `ComboBox_Change~E002Id~E004${curCtl.academicLevelInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+          );
+        }
         if (curCtl.classDescInputId) {
-          const levelMatch = item.className.match(/\b(Beg\s+[A-D]|A[0-2]|B[1-2](?:\.[1-2])?|C[1-2])\b/i);
           let descVal = "";
-          if (subLevelFilter) {
-            descVal = `*${subLevelFilter}*`;
-          } else if (levelMatch) {
-            descVal = `*${levelMatch[1]}*`;
-          } else if (!isAdult && item.className.length < 25) {
-            descVal = `*${item.className.trim()}*`;
+          // Derive hint for THIS class only (never let a global state filter block other cart items)
+          const hint = extractClassSearchHint(item.className);
+          if (hint) {
+            descVal = `*${hint}*`;
+          } else if (item.subLevelFilter) {
+            descVal = `*${item.subLevelFilter}*`;
           }
-          if (descVal) {
-            searchEvents.push(
-              `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
+          searchEvents.push(
+            `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+          );
         }
         searchEvents.push(
           `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
@@ -1556,25 +1657,56 @@
         rs.cookie = SAP.mergeCookies(rs.cookie, fRes.setCookie);
         rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(fRes.body));
 
-        const fClasses = SAP.parseRegistrationClasses(fRes.body);
+        let fClasses = SAP.parseRegistrationClasses(fRes.body);
 
-        const norm = (str) => String(str || "").replace(/\s+/g, "").toLowerCase();
-        const itemNorm = norm(item.className);
+        const norm = (str) => String(str || "").replace(/[\s\-_/–—\(\)]+/g, "").toLowerCase();
+        // Convert 12h AM/PM times into 24h before normalizing so e.g. "4:00 PM" matches "16:00"
+        const normTime = (str) => {
+          let s = String(str || "");
+          s = s.replace(/(\d{1,2}):(\d{2})\s*(am|pm)/gi, (_, h, m, meridiem) => {
+            let hour = parseInt(h, 10);
+            if (/pm/i.test(meridiem) && hour < 12) hour += 12;
+            if (/am/i.test(meridiem) && hour === 12) hour = 0;
+            return `${String(hour).padStart(2, "0")}:${m}`;
+          });
+          return norm(s);
+        };
+        const cleanCore = (s) => normTime(s).replace(/^t\d+/g, "").replace(/t\d+$/g, "");
+        const itemNorm = normTime(item.className);
+        const itemCore = cleanCore(item.className);
+        const itemStartDate = item.startDate || item.start || "";
+        const itemEndDate = item.endDate || item.end || "";
 
         const findMatchedClass = (classes) => {
           if (!Array.isArray(classes) || classes.length === 0) return null;
-          // 1. Exact name + exact start date (ignoring whitespace variations)
+          // 1. Exact normalized name (time/casing agnostic) + start date
           const exact = classes.find(
-            (c) => norm(c.className) === itemNorm && (!item.startDate || c.startDate === item.startDate)
+            (c) => normTime(c.className) === itemNorm && (!itemStartDate || c.startDate === itemStartDate)
           );
           if (exact) return exact;
-          // 2. Exact name (ignoring whitespace)
-          const nameMatch = classes.find((c) => norm(c.className) === itemNorm);
+
+          // 2. Core name match (ignoring T1..T11 prefix/suffix differences) + start date
+          if (itemStartDate) {
+            const coreMatch = classes.find(
+              (c) => c.startDate === itemStartDate && (cleanCore(c.className) === itemCore || cleanCore(c.className).includes(itemCore) || itemCore.includes(cleanCore(c.className)))
+            );
+            if (coreMatch) return coreMatch;
+          }
+
+          // 3. Exact normalized name
+          const nameMatch = classes.find((c) => normTime(c.className) === itemNorm || cleanCore(c.className) === itemCore);
           if (nameMatch) return nameMatch;
-          // 3. Start date + names contain each other
-          if (item.startDate) {
+
+          // 4. Exact start date and end date span match (for monthly/term packages)
+          if (itemStartDate && itemEndDate) {
+            const dateSpanMatch = classes.find((c) => c.startDate === itemStartDate && c.endDate === itemEndDate);
+            if (dateSpanMatch) return dateSpanMatch;
+          }
+
+          // 5. Start date + names contain each other
+          if (itemStartDate) {
             const dateMatch = classes.find(
-              (c) => c.startDate === item.startDate && (norm(c.className).includes(itemNorm) || itemNorm.includes(norm(c.className)))
+              (c) => c.startDate === itemStartDate && (norm(c.className).includes(norm(item.className)) || norm(item.className).includes(norm(c.className)))
             );
             if (dateMatch) return dateMatch;
           }
@@ -1583,10 +1715,40 @@
 
         let matchedClass = findMatchedClass(fClasses);
 
-        // If the target class is not within the first 5 visible rows (e.g. classes past May/June or lower in the schedule),
-        // scroll the SAP table in the popup until the target class is in the live DOM!
+        // Fallback: If targeted hint returned 0 rows, clear classDesc AND eventType filters and re-search to see all classes
+        if (!matchedClass && fClasses.length === 0) {
+          const resetEvents = [];
+          if (curCtl.classDescInputId) {
+            resetEvents.push(
+              `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            );
+          }
+          if (curCtl.eventTypeInputId) {
+            resetEvents.push(
+              `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            );
+          }
+          resetEvents.push(
+            `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
+            `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
+          );
+          const resetRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, resetEvents.join("~E001")) });
+          if (resetRes.ok && resetRes.body) {
+            rs.cookie = SAP.mergeCookies(rs.cookie, resetRes.setCookie);
+            rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(resetRes.body));
+            fClasses = SAP.parseRegistrationClasses(resetRes.body);
+            matchedClass = findMatchedClass(fClasses);
+          }
+        }
+
+        // If target class is not within the visible rows, scroll SAP popup in steps of 5 until found
         if (!matchedClass) {
           const scheduleTableId = rs.controls.scheduleTableId || "WD0592";
+          const crcMatch = (fRes.body && fRes.body.match(new RegExp(`id="${scheduleTableId}"[^>]*crc="(\\d+)"`, "i"))) ||
+            (fRes.body && fRes.body.match(/crc="(\d+)"/i));
+          const totalRowCount = crcMatch ? parseInt(crcMatch[1], 10) : 120;
+          const maxTarget = totalRowCount > 0 ? totalRowCount : 120;
+
           const initialTarget = (typeof item.firstVisibleIndex === "number" && item.firstVisibleIndex > 0)
             ? item.firstVisibleIndex
             : null;
@@ -1595,7 +1757,7 @@
           if (initialTarget !== null) {
             scrollIndicesToTry.push(initialTarget);
           }
-          for (let sIdx = 5; sIdx <= 100; sIdx += 5) {
+          for (let sIdx = 5; sIdx <= maxTarget; sIdx += 5) {
             if (sIdx !== initialTarget) {
               scrollIndicesToTry.push(sIdx);
             }

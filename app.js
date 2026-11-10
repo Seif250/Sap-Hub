@@ -222,14 +222,15 @@
           const ag = KB.calculateDetailedAge(r.dob);
           const active = r.studentNumber === selectedId;
           const cached = cache && cache[r.studentNumber];
-          const cachedHasPrebookedPT = cached && (cached.bookings || []).some((b) => {
+          const cachedHasPrebookedPT = cached && ((cached.profile && cached.profile.hasPrebookedPT) || (cached.bookings || []).some((b) => {
             const desc = `${b.courseCode || ""} ${b.courseDescription || ""} ${b.className || ""}`;
             return /ylcon|adcon|consultation|placement|assessment|\bpt\b/i.test(desc) &&
-              /prebook|reserv/i.test(b.status || "") &&
+              /prebook|reserv|pending|wait/i.test(b.status || "") &&
               !/cancel/i.test(b.status || "");
-          });
+          }));
+          const cachedIsEarlyYears = cached && ((cached.profile && cached.profile.isEarlyYears) || Boolean(ag && ag.stageCategory === "YL" && (ag.academicYears <= 5 || ag.years <= 5)));
           const cachedLvl = cached && cached.profile ? cached.profile.level : null;
-          const isNoLvl = !cachedHasPrebookedPT && (cached && cached.profile ? (cached.profile.isNoLevel || /no level|راسب/i.test(cachedLvl || "")) : false);
+          const isNoLvl = !cachedIsEarlyYears && !cachedHasPrebookedPT && (cached && cached.profile ? (cached.profile.isNoLevel || (!/no\s*level\s*assigned/i.test(cachedLvl || "") && /no level|راسب|ساقط/i.test(cachedLvl || ""))) : false);
 
           return html`<button
             key=${r.studentNumber}
@@ -259,6 +260,10 @@
                   ${cachedHasPrebookedPT ? html`
                     <span className="pill pill-amber !text-[10px] !py-0 !px-1.5 font-bold">
                       Pending PT Payment
+                    </span>
+                  ` : cachedIsEarlyYears ? html`
+                    <span className="pill pill-green !text-[10px] !py-0 !px-1.5 font-bold">
+                      ${cachedLvl || (ag && (ag.academicYears >= 5 || ag.years >= 5) ? "Early Years 3 (Owls)" : "Early Years 2 (Ducks)")}
                     </span>
                   ` : cachedLvl && html`
                     <span className=${`pill ${isNoLvl ? "pill-red" : /checking/i.test(cachedLvl) ? "pill-blue" : "pill-green"} !text-[10px] !py-0 !px-1.5 font-bold`}>
@@ -609,7 +614,17 @@
 
             <div className="relative">
               <${Fact} icon="cap" label="Current Level">
-                ${m.hasPrebookedPT ? html`
+                ${m.isEarlyYears ? html`
+                  <div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <b className="text-emerald-950 font-bold">${m.level}</b>
+                      <span className="pill pill-green font-bold !text-[10px] !py-0.5">Direct Placement (No PT)</span>
+                    </div>
+                    <div className="text-[11.5px] text-emerald-800 font-medium mt-0.5">
+                      التحاق مباشر للأطفال حسب السن — بدون امتحان تحديد مستوى
+                    </div>
+                  </div>
+                ` : m.hasPrebookedPT ? html`
                   <div>
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-bold text-amber-950">Pending PT Payment</span>
@@ -710,7 +725,7 @@
             `}
           </div>
 
-          ${m.hasPrebookedPT ? html`
+          ${m.isEarlyYears ? null : m.hasPrebookedPT ? html`
             <div className="mt-2 p-2.5 rounded-[8px] flex items-center justify-between text-[12px] border bg-amber-50/90 border-amber-300 text-amber-950">
               <div className="flex items-center gap-2">
                 <${Icon} name="alert" size=${16} className="text-amber-600 shrink-0" />
@@ -842,7 +857,7 @@
           </div>
           <span className="pill pill-amber shrink-0 font-bold">Unpaid PT (200 EGP)</span>
         </div>
-      ` : m && m.isNoLevel ? html`
+      ` : m && !m.isEarlyYears && !m.hasPrebookedPT && m.isNoLevel ? html`
         <div className="rounded-[10px] p-2.5 flex items-center justify-between text-[12px] border" style=${{ background: "var(--amber-50)", borderColor: "#fed7aa", color: "#9a3412" }}>
           <div className="flex items-center gap-2">
             <${Icon} name="alert" size=${16} className="text-amber-600 shrink-0" />
@@ -1262,7 +1277,7 @@
           </div>
           <span className="pill pill-amber shrink-0 font-bold">Unpaid · Awaiting Payment (200 EGP)</span>
         </div>
-      ` : profile.isNoLevel || /no level|راسب/i.test(detected || "") ? html`
+      ` : (!profile.isEarlyYears && !(model && model.isEarlyYears) && !profile.hasPrebookedPT && !(model && model.hasPrebookedPT) && (profile.isNoLevel || (!/no\s*level\s*assigned/i.test(detected || "") && /no level|راسب|ساقط/i.test(detected || "")))) ? html`
         <div className="rounded-[10px] p-3 flex items-center justify-between text-[12.5px] border" style=${{ background: "var(--red-50)", borderColor: "#fecaca", color: "#991b1b" }}>
           <div className="flex items-center gap-2">
             <${Icon} name="alert" size=${17} className="text-red-600 shrink-0" />
@@ -1319,7 +1334,7 @@
                 </thead>
                 <tbody>
                   ${filteredNotes.map((n, i) => {
-                    const isNoLvl = Boolean(n.isNoLevel || /no\s*level|راسب|ساقط|fail/i.test(n.title || n.text || ""));
+                    const isNoLvl = !(model && (model.isEarlyYears || model.hasPrebookedPT)) && Boolean(n.isNoLevel || (!/no\s*level\s*assigned/i.test(n.title || n.text || "") && /no\s*level|راسب|ساقط|fail/i.test(n.title || n.text || "")));
                     const hasLvl = !isNoLvl && Boolean(n.detectedLevel || /BEG|A0|Beginner/i.test(n.title || n.text || ""));
                     const isHold = !isNoLvl && /hold|alert|warning/i.test(n.type || n.title || "");
                     const isAr = /[\u0600-\u06FF]/.test(n.title || n.text || "");

@@ -1511,7 +1511,11 @@
     }
 
     if (!targetLevel) {
-      return null;
+      if (currentAcademicAge && currentAcademicAge <= 5) {
+        targetLevel = currentAcademicAge >= 5 ? "Early Years 3 (Owls)" : "Early Years 2 (Ducks)";
+      } else {
+        return null;
+      }
     }
 
     const levelRecords = parsedRecords.filter((r) => {
@@ -1868,8 +1872,8 @@
       : null;
 
     // Is Placement Test needed?
-    // Exempt if EY (4-5y), OR if student already has an assigned level in SAP, OR valid PT within 180 days (6 months)
-    const isEarlyYears = ageInfo && ageInfo.stageCategory === "YL" && ageInfo.academicYears >= 4 && ageInfo.academicYears <= 5;
+    // Exempt if EY (age <= 5: Ducks & Owls do NOT take Placement Tests), OR if student already has an assigned level in SAP, OR valid PT within 180 days (6 months)
+    const isEarlyYears = Boolean(ageInfo && ageInfo.stageCategory === "YL" && (ageInfo.academicYears <= 5 || ageInfo.years <= 5));
     const hasValidRecentPT = daysSinceLastPT !== null && daysSinceLastPT <= 180;
 
     // Is Eligible for Re-registration (within 3 months / 90 days of course activity)?

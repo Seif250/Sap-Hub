@@ -95,28 +95,29 @@
     const a = KB.analyzeSapStudentAndHistory(profile, bookings);
     const age = a.ageInfo;
     const isAdult = !!(age && age.stageCategory === "Adult");
+    const isEarlyYears = Boolean(
+      (age && (age.stageCategory === "YL" || age.isEarlyYears) && (age.academicYears <= 5 || age.years <= 5)) ||
+      a.isEarlyYears
+    );
+
+    const acadYrs = (age && typeof age.academicYears === "number") ? age.academicYears : (age ? age.years : 4);
+    let eyLevel = acadYrs >= 5 ? "Early Years 3 (Owls)" : "Early Years 2 (Ducks)";
+    if (acadYrs <= 3) eyLevel = "Early Years 1 (Pre-School)";
 
     const rawLvl = String((profile && profile.level) || "").trim();
+    if (rawLvl && /ducks/i.test(rawLvl)) eyLevel = "Early Years 2 (Ducks)";
+    else if (rawLvl && /owls/i.test(rawLvl)) eyLevel = "Early Years 3 (Owls)";
+
     const hasSpecificAssignedLevel = Boolean(
       rawLvl &&
       !/^a0(\s|$)/i.test(rawLvl) &&
       !/no\s*level|راسب|ساقط|no\s*level\s*assigned|checking/i.test(rawLvl)
     );
 
-    const isNoLevel = Boolean(
-      profile &&
-      !hasSpecificAssignedLevel && (
-        profile.isNoLevel ||
-        /no\s*level|راسب|ساقط/i.test(rawLvl) ||
-        /no\s*level|راسب|ساقط/i.test(profile.detectedLevelFromNotes || "") ||
-        (Array.isArray(profile.notesList) && profile.notesList.some((n) => /\bno\s*level\b|راسب|ساقط/i.test(n.title || n.text || "")))
-      )
-    );
-
     // Check for prebooked / pending payment Placement Test (PT / Consultation)
     // E.g. "EG Adult Online/Phone Consultation", "YL Consultation", etc.
-    const prebookedConsultation = (a && a.prebookedPT) || (bookings || []).find((b) => {
-      const desc = `${b.courseCode || ""} ${b.courseDescription || ""} ${b.className || ""}`;
+    const prebookedConsultation = (profile && profile.hasPrebookedPT && profile.prebookedPT) || (a && a.prebookedPT) || (bookings || []).find((b) => {
+      const desc = `${b.courseCode || ""} ${b.courseDescription || ""} ${b.classTitle || ""} ${b.className || ""} ${b.session || ""}`;
       const isPT = /ylcon|adcon|consultation|placement|assessment|\bpt\b/i.test(desc);
       if (!isPT) return false;
       const s = String(b.status || "").toLowerCase();
@@ -125,8 +126,27 @@
     });
     const hasPrebookedPT = Boolean(prebookedConsultation);
 
+    // Early Years children (Age 4-5 / Ducks & Owls) NEVER take or fail a Placement Test!
+    // Students with prebooked PT are awaiting payment/test, NOT failed!
+    // "No level assigned" in SAP is merely an unassigned placeholder, NOT a failed PT!
+    const isNoLevel = !isEarlyYears && !hasPrebookedPT && Boolean(
+      profile &&
+      !hasSpecificAssignedLevel && (
+        profile.isNoLevel ||
+        (!/no\s*level\s*assigned/i.test(rawLvl) && /no\s*level|راسب|ساقط/i.test(rawLvl)) ||
+        /no\s*level|راسب|ساقط/i.test(profile.detectedLevelFromNotes || "") ||
+        (Array.isArray(profile.notesList) && profile.notesList.some((n) => /\bno\s*level\b|راسب|ساقط/i.test(n.title || n.text || "")))
+      )
+    );
+
     let status = { label: "New", tone: "gray", reason: "No bookings found in SAP" };
-    if (hasPrebookedPT) {
+    if (isEarlyYears) {
+      status = a.activeBookings.length
+        ? { label: "Active", tone: "green", reason: "Has a current booking" }
+        : a.completedCourses.length
+        ? { label: "Inactive", tone: "amber", reason: "Past student, no current booking" }
+        : { label: "New (Early Years)", tone: "green", reason: `${eyLevel}: Direct enrollment without Placement Test` };
+    } else if (hasPrebookedPT) {
       status = {
         label: "PT Prebooked (Unpaid)",
         tone: "amber",
@@ -173,7 +193,14 @@
     const lastCourse = a.completedCourses.slice().sort((x, y) => (y.parsedDate || 0) - (x.parsedDate || 0))[0];
 
     let pt;
-    if (hasPrebookedPT) {
+    if (isEarlyYears) {
+      pt = {
+        label: "Exempt",
+        tone: "green",
+        fee: 0,
+        detail: `${eyLevel} · Ages 4 & 5 do NOT need a Placement Test (Direct Enrollment)`,
+      };
+    } else if (hasPrebookedPT) {
       pt = {
         label: "Prebooked (Unpaid)",
         tone: "amber",
@@ -213,7 +240,9 @@
     const hasAgeTransition = Boolean(isAdult && prog && prog.ageTransition && prog.ageTransition.hasAgedUp);
     const adultTransitionLevel = hasAgeTransition ? prog.ageTransition.recommendedLevel : null;
 
-    const rawAssignedLevel = hasPrebookedPT
+    const rawAssignedLevel = isEarlyYears
+      ? eyLevel
+      : hasPrebookedPT
       ? "Pending PT Payment (Unpaid)"
       : isNoLevel
       ? "No Level (Failed PT)"
@@ -229,7 +258,10 @@
     let currentActualLevel;
     let recommendedBookingLevel;
 
-    if (hasPrebookedPT) {
+    if (isEarlyYears) {
+      currentActualLevel = eyLevel;
+      recommendedBookingLevel = eyLevel;
+    } else if (hasPrebookedPT) {
       currentActualLevel = "Pending PT Payment (Unpaid)";
       recommendedBookingLevel = "Pending PT Payment";
     } else if (isNoLevel) {
@@ -257,6 +289,7 @@
       progression: prog,
       age,
       isAdult,
+      isEarlyYears,
       isNoLevel,
       hasPrebookedPT,
       prebookedPT: prebookedConsultation || null,

@@ -946,7 +946,8 @@
   /** Level rules: detects No Level, Early Years, Starter A/B, Primary Plus 1-6, Secondary/Upper Secondary Plus, Beginner A-E, and CEFR levels in notes. */
   function detectLevelFromNotesText(text, extraXml) {
     const t = String(text || "");
-    if (/(?:\bno\s*level\b|\bnot\s*placed\b|\bunplaced\b|ساقط|راسب|لم يجتز)/i.test(t) || /\bNo\s*Level\b/i.test(String(extraXml || ""))) {
+    // Note: "No level assigned" in the SAP header is merely an unassigned placeholder, NOT a failed PT!
+    if (!/no\s*level\s*assigned/i.test(t) && (/(?:\bno\s*level\b|\bnot\s*placed\b|\bunplaced\b|ساقط|راسب|لم يجتز)/i.test(t) || /\bNo\s*Level\b/i.test(String(extraXml || "")))) {
       return { detectedLevel: "No Level (Failed PT)", isNoLevel: true };
     }
     // Early Years
@@ -1546,11 +1547,31 @@
       };
     }
 
-    // 6. Early Years / Pre-School
-    if (/Early\s*Years|Pre-School/i.test(lvl)) {
+    // 6. Early Years / Pre-School (Ducks = EY2, Owls = EY3)
+    if (/Early\s*Years|Pre-School|Ducks|Owls|\bEY\d?\b/i.test(lvl)) {
+      if (/Owls|\bEY3\b|Years\s*3/i.test(lvl)) {
+        return {
+          courseCode: `${b}-EY3`,
+          courseSuffix: "EY3",
+          courseType: "YL",
+          academicLevelKey: "0202",
+          subLevelFilter: "Owls",
+          label: "Early Years 3 (Owls)",
+        };
+      }
+      if (/Ducks|\bEY2\b|Years\s*2/i.test(lvl)) {
+        return {
+          courseCode: `${b}-EY2`,
+          courseSuffix: "EY2",
+          courseType: "YL",
+          academicLevelKey: "0201",
+          subLevelFilter: "Ducks",
+          label: "Early Years 2 (Ducks)",
+        };
+      }
       return {
-        courseCode: `${b}-EY1`,
-        courseSuffix: "EY1",
+        courseCode: `${b}-EY`,
+        courseSuffix: "EY",
         courseType: "YL",
         academicLevelKey: "0200",
         subLevelFilter: "",
@@ -2440,7 +2461,11 @@
       // Deduce from className or courseDescription
       const cls = String(b.className || "");
       const desc = String(b.courseDescription || "");
-      if (/PriPlus1|\bPP1\b/i.test(cls) || /Primary Plus 1/i.test(desc)) rawCourse = `${centre.code}-PP1`;
+      if (/Ducks|\bEY2\b|Early Years 2/i.test(cls) || /Ducks|Early Years 2/i.test(desc)) rawCourse = `${centre.code}-EY2`;
+      else if (/Owls|\bEY3\b|Early Years 3/i.test(cls) || /Owls|Early Years 3/i.test(desc)) rawCourse = `${centre.code}-EY3`;
+      else if (/Early Years 1|\bEY1\b/i.test(cls) || /Early Years 1/i.test(desc)) rawCourse = `${centre.code}-EY1`;
+      else if (/Early Years|\bEY\b/i.test(cls) || /Early Years/i.test(desc)) rawCourse = `${centre.code}-EY`;
+      else if (/PriPlus1|\bPP1\b/i.test(cls) || /Primary Plus 1/i.test(desc)) rawCourse = `${centre.code}-PP1`;
       else if (/PriPlus2|\bPP2\b/i.test(cls) || /Primary Plus 2/i.test(desc)) rawCourse = `${centre.code}-PP2`;
       else if (/PriPlus3|\bPP3\b/i.test(cls) || /Primary Plus 3/i.test(desc)) rawCourse = `${centre.code}-PP3`;
       else if (/PriPlus4|\bPP4\b/i.test(cls) || /Primary Plus 4/i.test(desc)) rawCourse = `${centre.code}-PP4`;
