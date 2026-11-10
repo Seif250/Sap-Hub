@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="sap-hub-app" content="1.2.0" />
+  <title>Sales Assistant — SAP Student Sales Copilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/styles.css?v=6.9" />
+  <script>
+    window.__appErrors = [];
+    window.addEventListener('error', function(e) {
+      window.__appErrors.push({ msg: e.message, file: e.filename, line: e.lineno, col: e.colno, stack: e.error ? e.error.stack : null });
+      var box = document.getElementById('debug-err');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'debug-err';
+        box.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:16px;background:#fee2e2;color:#991b1b;font-family:monospace;font-size:13px;z-index:999999;border-bottom:2px solid #ef4444;white-space:pre-wrap;';
+        document.body.prepend(box);
+      }
+      box.textContent += '[Script Error] ' + e.message + ' (' + (e.filename || '').split('/').pop() + ':' + e.lineno + ')\n' + (e.error && e.error.stack ? e.error.stack + '\n' : '');
+    });
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+</head>
+
+<body>
+  <div id="root"></div>
+  <!-- Data & integration layer (no UI) -->
+  <script src="/sap-client.js?v=6.9"></script>
+  <script src="/sap-service.js?v=6.9"></script>
+  <script src="/bc-kb.js?v=6.9"></script>
+  <!-- UI layer -->
+  <script src="/ui-kit.js?v=6.9"></script>
+  <script src="/booking-modal.js?v=6.9"></script>
+  <script src="/app.js?v=6.9"></script>
+</body>
+
+</html>

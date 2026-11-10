@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SAP Copilot Auto-Sync</title>
+  <style>
+    body {
+      width: 280px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      padding: 14px;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .badge-green { background: #ecfdf5; color: #047857; }
+    .badge-amber { background: #fffbeb; color: #b45309; }
+    .badge-red { background: #fef2f2; color: #b91c1c; }
+    .card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .btn {
+      width: 100%;
+      height: 32px;
+      background: #0b4fd1;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn:hover { background: #0a45b8; }
+    .muted { color: #64748b; font-size: 11.5px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div style="font-weight: 700; color: #0b1f44; font-size: 14px;">SAP Auto-Sync</div>
+    <div id="statusBadge" class="badge badge-amber" style="margin-left: auto;">
+      <span class="dot"></span>Checking...
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-size: 11.5px; color: #475569; margin-bottom: 4px;">Last Synced to Local Hub:</div>
+    <div id="lastSyncTxt" style="font-weight: 600; font-size: 12.5px;">Not synced yet</div>
+    <div id="sessionTxt" style="margin-top: 4px;" class="muted">SAP Session: Checking...</div>
+  </div>
+
+  <button id="syncBtn" class="btn">
+    🔄 Sync Now
+  </button>
+
+  <div style="margin-top: 10px; text-align: center;">
+    <a href="http://localhost:8787" target="_blank" style="color: #0b4fd1; text-decoration: none; font-size: 11.5px; font-weight: 500;">
+      Open Sales Assistant ↗
+    </a>
+  </div>
+
+  <script>
+    function updateUI() {
+      chrome.storage.local.get(["lastSync", "hasSession", "status"], (res) => {
+        const badge = document.getElementById("statusBadge");
+        const lastTxt = document.getElementById("lastSyncTxt");
+        const sessTxt = document.getElementById("sessionTxt");
+
+        if (res.lastSync) {
+          const dt = new Date(res.lastSync);
+          lastTxt.innerText = dt.toLocaleTimeString();
+          badge.className = "badge badge-green";
+          badge.innerHTML = '<span class="dot"></span>Active';
+        } else {
+          lastTxt.innerText = "Waiting for SAP...";
+          badge.className = "badge badge-amber";
+          badge.innerHTML = '<span class="dot"></span>Waiting';
+        }
+
+        if (res.hasSession) {
+          sessTxt.innerText = "SAP_SESSIONID: Detected & Fresh ✅";
+          sessTxt.style.color = "#047857";
+        } else {
+          sessTxt.innerText = "SAP_SESSIONID: Not found yet";
+          sessTxt.style.color = "#b45309";
+        }
+      });
+    }
+
+    document.getElementById("syncBtn").addEventListener("click", () => {
+      chrome.runtime.sendMessage({ action: "forceSync" }, () => {
+        updateUI();
+      });
+    });
+
+    updateUI();
+  </script>
+</body>
+</html>
+
