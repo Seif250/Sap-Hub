@@ -309,6 +309,9 @@
           const suffix = first._courseCode.replace(/^[^-]+-/, "");
           setCourseSuffix(suffix);
         }
+        const itemY = first.year || (first.startDate && first.startDate.match(/\b(20\d{2})\b/)?.[1]);
+        if (itemY) setYear(itemY);
+        setSubLevelFilter("");
         setCartClasses(initialClasses);
         openConfirmModal(initialClasses);
       }

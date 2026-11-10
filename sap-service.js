@@ -1400,18 +1400,8 @@
     if (/\bducks\b/i.test(s)) return "Ducks";
     if (/\bowls\b/i.test(s)) return "Owls";
 
-    // 4. Term token: e.g. "T1", "T2", "T3"..."T11"
-    const termMatch = s.match(/\b(T\d{1,2})\b/i);
-    if (termMatch) return termMatch[1];
-
-    // 5. CEFR level: e.g. "B1.1", "B2.2", "A2", "B1"
-    const cefrMatch = s.match(/\b([A-C][12](?:\.[12])?)\b/i);
-    if (cefrMatch) return cefrMatch[1];
-
-    // 6. Day pattern: e.g. "Sun/Wed", "Mon/Wed", "Tue/Thu", "Fri/Sat"
-    const dayMatch = s.match(/\b(Sun|Mon|Tue|Wed|Thu|Fri|Sat)(?:\/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat))?\b/i);
-    if (dayMatch) return dayMatch[0];
-
+    // Note: Do NOT return term tokens (T1..T11) or days as classDesc hints;
+    // in SAP WebDynpro, terms/days belong to session or day columns, not class description!
     return "";
   }
 
@@ -1515,17 +1505,31 @@
             || SAP.TEACHING_CENTRES[0];
           const branchPrefix = (centreObj && centreObj.code) || "AGU";
 
-          if (/\b(AD Beg|Beginner|Beg\s+[A-D])\b/i.test(item.className)) {
+          const cls = item.className || "";
+          const ppM = cls.match(/\b(?:PriPlus|Primary\s*Plus\s*)(\d)\b/i);
+          const secM = cls.match(/\b(?:SecPlus|Secondary\s*Plus\s*)([A-C][12](?:\.[12])?)\b/i);
+          const usM = cls.match(/\b(?:Upper\s*Sec(?:ondary)?|US\s*)([A-C][12](?:\.[12])?)\b/i);
+          const pstM = cls.match(/\b(?:Starter|PSt)\s*([AB])\b/i);
+
+          if (ppM) {
+            itemCourseCode = `${branchPrefix}-PP${ppM[1]}`;
+          } else if (secM) {
+            itemCourseCode = `${branchPrefix}-S${secM[1].toUpperCase()}`;
+          } else if (usM) {
+            itemCourseCode = `${branchPrefix}-US${usM[1].toUpperCase()}`;
+          } else if (pstM) {
+            itemCourseCode = `${branchPrefix}-PSt${pstM[1].toUpperCase()}`;
+          } else if (/\b(AD Beg|Beginner|Beg\s+[A-D])\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-AD Beg`;
-          } else if (/\b(?:BCE|British\s*Council\s*English|\d{1,2}L(?:\s*\/\s*\d{1,2}M)?)\b/i.test(item.className)) {
+          } else if (/\b(?:BCE|British\s*Council\s*English|\d{1,2}L(?:\s*\/\s*\d{1,2}M)?)\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-BCE`;
-          } else if (/\bIELTS\b/i.test(item.className)) {
+          } else if (/\bIELTS\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-IELTS`;
-          } else if (/\b(Owls|EY3)\b/i.test(item.className)) {
+          } else if (/\b(Owls|EY3)\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-EY3`;
-          } else if (/\b(Ducks|EY2)\b/i.test(item.className)) {
+          } else if (/\b(Ducks|EY2)\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-EY2`;
-          } else if (/\b(EY1)\b/i.test(item.className)) {
+          } else if (/\b(EY1)\b/i.test(cls)) {
             itemCourseCode = `${branchPrefix}-EY1`;
           } else {
             itemCourseCode = primaryCourseCode;
@@ -1610,30 +1614,17 @@
             `ComboBox_Change~E002Id~E004${curCtl.yearInputId}~E005Value~E004${SAP.sapEscape(itemYear)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
           );
         }
-        // Always explicitly reset/pass eventType so stale BCE package filters don't block general/Beginner classes
-        if (curCtl.eventTypeInputId) {
-          const evVal = item.eventType || "";
+        if (curCtl.eventTypeInputId && item.eventType && !/^(?:New\s*)?\d{1,2}L/i.test(item.eventType)) {
           searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004${SAP.sapEscape(evVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
-        }
-        if (curCtl.sessionInputId) {
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.sessionInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
-        }
-        if (curCtl.academicLevelInputId) {
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.academicLevelInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004${SAP.sapEscape(item.eventType)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
           );
         }
         if (curCtl.classDescInputId) {
           let descVal = "";
-          // Derive hint for THIS class only (never let a global state filter block other cart items)
           const hint = extractClassSearchHint(item.className);
           if (hint) {
             descVal = `*${hint}*`;
-          } else if (item.subLevelFilter) {
+          } else if (item.subLevelFilter && !/^(?:T\d+|Sat|Sun|Mon|Tue|Wed|Thu|Fri)/i.test(item.subLevelFilter)) {
             descVal = `*${item.subLevelFilter}*`;
           }
           searchEvents.push(
@@ -1645,14 +1636,57 @@
           `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
         );
 
-        const fRes = await proxy({
+        let fRes = await proxy({
           url: rs.contextUrl,
           method: "POST",
           cookie: rs.cookie,
           body: postRegBody(rs.secureId, searchEvents.join("~E001")),
         });
+
+        // If session expired or request failed, re-open popup and retry once
+        if (!fRes.ok || !fRes.body || fRes.body.includes("SAMLRequest") || fRes.sessionState === "RELEASED") {
+          onStep && onStep("Reconnecting SAP registration session…");
+          rs = await initRegistrationPopup({
+            studentId: cleanId,
+            centreKey: primaryCentreKey,
+            bookingAction,
+            onStep,
+          });
+          const retryCtl = rs.controls;
+          const retrySearchEvents = [];
+          if (retryCtl.courseInputId && itemCourseCode) {
+            retrySearchEvents.push(
+              `ComboBox_Change~E002Id~E004${retryCtl.courseInputId}~E005Value~E004${SAP.sapEscape(itemCourseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            );
+          }
+          if (retryCtl.yearInputId) {
+            retrySearchEvents.push(
+              `ComboBox_Change~E002Id~E004${retryCtl.yearInputId}~E005Value~E004${SAP.sapEscape(itemYear)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            );
+          }
+          if (retryCtl.classDescInputId) {
+            let descVal = "";
+            const hint = extractClassSearchHint(item.className);
+            if (hint) descVal = `*${hint}*`;
+            retrySearchEvents.push(
+              `ComboBox_Change~E002Id~E004${retryCtl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+            );
+          }
+          retrySearchEvents.push(
+            `Button_Press~E002Id~E004${retryCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
+            `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
+          );
+          fRes = await proxy({
+            url: rs.contextUrl,
+            method: "POST",
+            cookie: rs.cookie,
+            body: postRegBody(rs.secureId, retrySearchEvents.join("~E001")),
+          });
+        }
+
         if (!fRes.ok || !fRes.body) {
-          throw new Error(`Failed to locate class "${item.className}" in SAP.`);
+          const detail = (fRes && (fRes.error || fRes.status)) ? ` (${fRes.error || fRes.status})` : "";
+          throw new Error(`Failed to locate class "${item.className}" in SAP${detail}.`);
         }
         rs.cookie = SAP.mergeCookies(rs.cookie, fRes.setCookie);
         rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(fRes.body));
@@ -1715,23 +1749,13 @@
 
         let matchedClass = findMatchedClass(fClasses);
 
-        // Fallback: If targeted hint returned 0 rows, clear classDesc AND eventType filters and re-search to see all classes
-        if (!matchedClass && fClasses.length === 0) {
-          const resetEvents = [];
-          if (curCtl.classDescInputId) {
-            resetEvents.push(
-              `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
-          if (curCtl.eventTypeInputId) {
-            resetEvents.push(
-              `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
-          resetEvents.push(
+        // Fallback: If targeted hint returned 0 rows, clear classDesc filter and re-search to see all classes
+        if (!matchedClass && fClasses.length === 0 && curCtl.classDescInputId) {
+          const resetEvents = [
+            `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`,
             `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
             `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
-          );
+          ];
           const resetRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, resetEvents.join("~E001")) });
           if (resetRes.ok && resetRes.body) {
             rs.cookie = SAP.mergeCookies(rs.cookie, resetRes.setCookie);
