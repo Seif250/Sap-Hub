@@ -1,7 +1,7 @@
 // ============================================================================
-// SAP Copilot Auto-Sync Extension - Background Service Worker (v1.2.0)
-// - Intercepts & syncs live SAP session cookies to localhost:8787 (if running)
-// - Provides Direct Extension Bridge for Cloudflare Pages & Web UI (Zero Server!)
+// SAP Copilot Auto-Sync Extension - Background Service Worker (v1.2.1 - Turbo)
+// - Ultra-low latency Direct Extension Bridge for Cloudflare Pages & Web UI
+// - In-memory cookie caching (0ms overhead on proxy requests)
 // ============================================================================
 
 const SAP_DOMAINS = [
@@ -15,17 +15,33 @@ const DNR_RULE_ID = 8888;
 let lastSyncTime = null;
 let lastSyncedHash = "";
 
+// In-memory cookie cache for instant zero-overhead responses
+let cachedCookies = {
+  cookie: "",
+  hasSession: false,
+  cookieCount: 0,
+  syncedAt: null
+};
+let isCookieRefreshing = false;
+let lastInjectedCookie = "";
+let lastDnrCookie = "";
+let lastDnrReferer = "";
+
 /**
  * Gathers and deduplicates all cookies from the British Council SAP domains.
  */
-async function getActiveSapCookies() {
+async function refreshCachedCookies() {
+  if (isCookieRefreshing) return cachedCookies;
+  isCookieRefreshing = true;
   try {
     let allCookies = [];
     for (const domain of SAP_DOMAINS) {
-      const cList = await chrome.cookies.getAll({ domain });
-      if (Array.isArray(cList)) {
-        allCookies.push(...cList);
-      }
+      try {
+        const cList = await chrome.cookies.getAll({ domain });
+        if (Array.isArray(cList)) {
+          allCookies.push(...cList);
+        }
+      } catch (e) {}
     }
 
     const cookieMap = new Map();
@@ -47,53 +63,53 @@ async function getActiveSapCookies() {
       .map(([name, val]) => `${name}=${val}`)
       .join("; ");
 
-    return {
+    cachedCookies = {
       cookie: cookieString,
       hasSession,
       cookieCount: cookieMap.size,
       syncedAt: new Date().toISOString()
     };
+    return cachedCookies;
   } catch (err) {
     console.warn("[SAP Extension] Error reading cookies:", err);
-    return {
-      cookie: "",
-      hasSession: false,
-      cookieCount: 0,
-      syncedAt: null,
-      error: err.message
-    };
+    return cachedCookies;
+  } finally {
+    isCookieRefreshing = false;
   }
 }
 
 /**
- * Injects a cookie string into Chrome's cookie store for SAP domain.
+ * Injects a cookie string into Chrome's cookie store (in parallel for high speed).
  */
 async function injectCookiesIntoStore(cookieString, domain = "prd-sap.sms.britishcouncil.org") {
-  if (!cookieString || typeof cookieString !== "string") return;
+  if (!cookieString || typeof cookieString !== "string" || cookieString === lastInjectedCookie) return;
+  lastInjectedCookie = cookieString;
   const pairs = cookieString.split(";");
+  const promises = [];
   for (const pair of pairs) {
     const idx = pair.indexOf("=");
     if (idx > 0) {
       const name = pair.slice(0, idx).trim();
       const value = pair.slice(idx + 1).trim();
       if (name && value) {
-        try {
-          await chrome.cookies.set({
+        promises.push(
+          chrome.cookies.set({
             url: "https://" + domain,
             name,
             value,
             domain: domain,
             path: "/"
-          });
-        } catch (e) {}
+          }).catch(() => {})
+        );
       }
     }
   }
+  await Promise.all(promises);
 }
 
 /**
- * Direct proxy handler for SAP Web Dynpro requests from Cloudflare Pages / Web Client.
- * Runs inside the browser context that has direct access to British Council network.
+ * Turbo proxy handler for SAP Web Dynpro requests from Cloudflare Pages.
+ * Optimized for maximum speed: zero sequential IPC calls, parallel processing.
  */
 async function handleSapProxy(payload) {
   if (!payload || !payload.url) {
@@ -106,46 +122,50 @@ async function handleSapProxy(payload) {
   const referer = payload.referer || "https://prd-sap.sms.britishcouncil.org/sap/bc/webdynpro/sap/z_her_wa_student?WDCONFIGURATIONID=Z_HER_AC_STUDENT";
   let cookie = payload.cookie || "";
 
-  // If no explicit cookie passed, fetch active cookies from Chrome store
+  // 1. Fast cookie resolution from cache
   if (!cookie) {
-    const active = await getActiveSapCookies();
-    cookie = active.cookie;
-  } else {
-    // If explicit cookie passed, update the cookie store
-    await injectCookiesIntoStore(cookie);
+    if (!cachedCookies.cookie) {
+      await refreshCachedCookies();
+    }
+    cookie = cachedCookies.cookie;
+  } else if (cookie !== lastInjectedCookie) {
+    // Only inject if cookie actually changed (parallelized)
+    injectCookiesIntoStore(cookie).catch(() => {});
   }
 
-  // Set dynamic declarative rule to preserve exact Referer and Cookie headers
-  try {
-    if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
-      const reqHeaders = [
-        { header: "Referer", operation: "set", value: referer },
-        { header: "Accept-Language", operation: "set", value: "en-GB,en;q=0.9,en-US;q=0.8" },
-        { header: "X-Requested-With", operation: "set", value: "XMLHttpRequest" },
-        { header: "X-XHR-Logon", operation: "set", value: "accept" }
-      ];
-      if (cookie) {
-        reqHeaders.push({ header: "Cookie", operation: "set", value: cookie });
-      }
+  // 2. Fast DNR rule check: only update dynamic rules if headers actually changed
+  if (cookie !== lastDnrCookie || referer !== lastDnrReferer) {
+    lastDnrCookie = cookie;
+    lastDnrReferer = referer;
+    try {
+      if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
+        const reqHeaders = [
+          { header: "Referer", operation: "set", value: referer },
+          { header: "Accept-Language", operation: "set", value: "en-GB,en;q=0.9,en-US;q=0.8" },
+          { header: "X-Requested-With", operation: "set", value: "XMLHttpRequest" },
+          { header: "X-XHR-Logon", operation: "set", value: "accept" }
+        ];
+        if (cookie) {
+          reqHeaders.push({ header: "Cookie", operation: "set", value: cookie });
+        }
 
-      await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [DNR_RULE_ID],
-        addRules: [{
-          id: DNR_RULE_ID,
-          priority: 999,
-          action: {
-            type: "modifyHeaders",
-            requestHeaders: reqHeaders
-          },
-          condition: {
-            urlFilter: "||prd-sap.sms.britishcouncil.org",
-            resourceTypes: ["xmlhttprequest"]
-          }
-        }]
-      });
-    }
-  } catch (ruleErr) {
-    console.warn("[SAP Proxy] DNR rule warning:", ruleErr);
+        chrome.declarativeNetRequest.updateDynamicRules({
+          removeRuleIds: [DNR_RULE_ID],
+          addRules: [{
+            id: DNR_RULE_ID,
+            priority: 999,
+            action: {
+              type: "modifyHeaders",
+              requestHeaders: reqHeaders
+            },
+            condition: {
+              urlFilter: "||prd-sap.sms.britishcouncil.org",
+              resourceTypes: ["xmlhttprequest"]
+            }
+          }]
+        }).catch(() => {});
+      }
+    } catch (ruleErr) {}
   }
 
   const fetchHeaders = {
@@ -160,7 +180,7 @@ async function handleSapProxy(payload) {
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 65000);
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     const resp = await fetch(targetUrl, {
       method,
@@ -174,23 +194,20 @@ async function handleSapProxy(payload) {
     const bodyText = await resp.text();
     const sessionState = resp.headers.get("sap-session-state") || "";
 
-    // Read back fresh cookies after SAP responded
-    const fresh = await getActiveSapCookies();
-
+    // Instantly return without blocking on chrome.cookies.getAll
     return {
       ok: resp.ok,
       status: resp.status,
       finalUrl: resp.url,
-      setCookie: fresh.cookie,
+      setCookie: cachedCookies.cookie || cookie,
       sessionState: sessionState,
       body: bodyText
     };
   } catch (err) {
-    console.error("[SAP Proxy] Fetch failed:", err);
     return {
       ok: false,
       status: 0,
-      error: "SAP Network Request Failed: " + (err.name === "AbortError" ? "Request timed out after 65s" : err.message),
+      error: "SAP Network Request Failed: " + (err.name === "AbortError" ? "Request timed out after 60s" : err.message),
       body: ""
     };
   }
@@ -201,7 +218,10 @@ async function handleSapProxy(payload) {
  */
 async function syncCookiesToLocalAssistant() {
   try {
-    const active = await getActiveSapCookies();
+    if (!cachedCookies.cookie) {
+      await refreshCachedCookies();
+    }
+    const active = cachedCookies;
     if (!active.cookie || active.cookie === lastSyncedHash) {
       return;
     }
@@ -227,10 +247,9 @@ async function syncCookiesToLocalAssistant() {
         hasSession: active.hasSession,
         status: "connected"
       });
-      console.log("[SAP Copilot Sync] Cookies pushed to local server at", lastSyncTime.toLocaleTimeString());
     }
   } catch (err) {
-    chrome.storage.local.set({ status: "offline", error: err.message });
+    chrome.storage.local.set({ status: "offline" });
   }
 }
 
@@ -238,15 +257,19 @@ async function syncCookiesToLocalAssistant() {
 chrome.cookies.onChanged.addListener((changeInfo) => {
   const d = changeInfo.cookie.domain || "";
   if (SAP_DOMAINS.some((dom) => d.includes(dom))) {
-    syncCookiesToLocalAssistant();
+    refreshCachedCookies().then(() => {
+      syncCookiesToLocalAssistant();
+    });
   }
 });
 
-// 2. Periodic heartbeat sync every 45 seconds
-chrome.alarms.create("sapCookieSyncAlarm", { periodInMinutes: 0.75 });
+// 2. Periodic heartbeat sync every 60 seconds
+chrome.alarms.create("sapCookieSyncAlarm", { periodInMinutes: 1.0 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "sapCookieSyncAlarm") {
-    syncCookiesToLocalAssistant();
+    refreshCachedCookies().then(() => {
+      syncCookiesToLocalAssistant();
+    });
   }
 });
 
@@ -255,19 +278,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.action) return false;
 
   if (msg.action === "forceSync") {
-    syncCookiesToLocalAssistant().then(() => {
+    refreshCachedCookies().then(() => syncCookiesToLocalAssistant()).then(() => {
       sendResponse({ ok: true, syncedAt: lastSyncTime ? lastSyncTime.toISOString() : null });
     });
     return true;
   }
 
   if (msg.action === "GET_ACTIVE_COOKIES") {
-    getActiveSapCookies().then((res) => {
-      sendResponse(res);
-    }).catch((err) => {
-      sendResponse({ error: err.message });
-    });
-    return true; // Keep message channel open for async response
+    if (cachedCookies.cookie) {
+      sendResponse(cachedCookies);
+      // Refresh in background
+      refreshCachedCookies();
+    } else {
+      refreshCachedCookies().then((res) => {
+        sendResponse(res);
+      }).catch((err) => {
+        sendResponse({ error: err.message });
+      });
+    }
+    return true;
   }
 
   if (msg.action === "SAP_PROXY") {
@@ -276,11 +305,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }).catch((err) => {
       sendResponse({ ok: false, error: err.message });
     });
-    return true; // Keep message channel open for async response
+    return true;
   }
 
   return false;
 });
 
-// Initial run
-syncCookiesToLocalAssistant();
+// Initial warm-up
+refreshCachedCookies();

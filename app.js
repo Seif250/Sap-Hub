@@ -1956,7 +1956,7 @@
         } catch (e) {}
       }
       checkSync();
-      const interval = setInterval(checkSync, 8000);
+      const interval = setInterval(checkSync, 25000);
       return () => clearInterval(interval);
     }, []);
 

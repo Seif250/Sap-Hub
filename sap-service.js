@@ -1232,23 +1232,24 @@
     const allClasses = SAP.parseRegistrationClasses(sRes.body).map((c) => ({ ...c, firstVisibleIndex: 0 }));
     const messages = SAP.parseSapMessages(sRes.body);
 
-    // Fetch additional rows until all rows are loaded (supporting up to 100 classes across all 12 months)
+    // Fetch additional rows only if table actually has more unrendered rows (step by 15 for turbo speed)
     const rowCountMatch = sRes.body.match(/aria-rowcount="(\d+)"/i)
       || sRes.body.match(/iContentRowCount="(\d+)"/i)
       || sRes.body.match(/data-itemcount="(\d+)"/i);
-    const totalRowCount = rowCountMatch ? Math.max(parseInt(rowCountMatch[1], 10) - 1, allClasses.length) : 100;
-    const maxTarget = Math.min(Math.max(totalRowCount, 60), 100);
+    const totalRowCount = rowCountMatch ? Math.max(parseInt(rowCountMatch[1], 10) - 1, 0) : 0;
+    const maxTarget = totalRowCount > 0 ? Math.min(totalRowCount, 80) : 40;
 
-    if (allClasses.length > 0) {
+    let didScroll = false;
+    if (allClasses.length > 0 && (totalRowCount === 0 || allClasses.length < totalRowCount)) {
       const seenNames = new Set(allClasses.map((c) => `${c.className}|${c.startDate}`));
-      let consecutiveNoNew = 0;
-      for (let idx = allClasses.length; idx < maxTarget && consecutiveNoNew < 2; idx += 5) {
+      for (let idx = allClasses.length; idx < maxTarget; idx += 15) {
         onStep && onStep(`Loading full yearly schedules from SAP (${allClasses.length} classes loaded)…`);
         const scrollQ =
           `SapTable_VerticalScroll~E002Id~E004${rs.controls.scheduleTableId || "WD0592"}~E005FirstVisibleItemIndex~E004${idx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
           `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
         const scRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, scrollQ) });
         if (scRes.ok && scRes.body) {
+          didScroll = true;
           rs.cookie = SAP.mergeCookies(rs.cookie, scRes.setCookie);
           rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(scRes.body));
           const moreClasses = SAP.parseRegistrationClasses(scRes.body);
@@ -1261,33 +1262,33 @@
               addedCount++;
             }
           });
-          if (addedCount === 0) {
-            consecutiveNoNew++;
-          } else {
-            consecutiveNoNew = 0;
+          if (addedCount === 0 || (totalRowCount > 0 && allClasses.length >= totalRowCount)) {
+            break;
           }
         } else {
           break;
         }
       }
-      // Scroll back to top (index 0) so row indices 1..5 match immediate selection, and refresh top row IDs & okPopupBtn
-      const topQ =
-        `SapTable_VerticalScroll~E002Id~E004${rs.controls.scheduleTableId || "WD0592"}~E005FirstVisibleItemIndex~E0040~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
-        `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
-      const topRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, topQ) });
-      if (topRes.ok && topRes.body) {
-        rs.cookie = SAP.mergeCookies(rs.cookie, topRes.setCookie);
-        rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(topRes.body));
-        const topClasses = SAP.parseRegistrationClasses(topRes.body);
-        topClasses.forEach((tc) => {
-          const existing = allClasses.find((c) => c.className === tc.className && (!tc.startDate || c.startDate === tc.startDate));
-          if (existing) {
-            existing.rowIndex = tc.rowIndex;
-            existing.triggerCellId = tc.triggerCellId;
-            existing.tableId = tc.tableId;
-            existing.firstVisibleIndex = 0;
-          }
-        });
+      if (didScroll) {
+        // Scroll back to top (index 0) so row indices 1..5 match immediate selection, and refresh top row IDs & okPopupBtn
+        const topQ =
+          `SapTable_VerticalScroll~E002Id~E004${rs.controls.scheduleTableId || "WD0592"}~E005FirstVisibleItemIndex~E0040~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
+          `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+        const topRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, topQ) });
+        if (topRes.ok && topRes.body) {
+          rs.cookie = SAP.mergeCookies(rs.cookie, topRes.setCookie);
+          rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(topRes.body));
+          const topClasses = SAP.parseRegistrationClasses(topRes.body);
+          topClasses.forEach((tc) => {
+            const existing = allClasses.find((c) => c.className === tc.className && (!tc.startDate || c.startDate === tc.startDate));
+            if (existing) {
+              existing.rowIndex = tc.rowIndex;
+              existing.triggerCellId = tc.triggerCellId;
+              existing.tableId = tc.tableId;
+              existing.firstVisibleIndex = 0;
+            }
+          });
+        }
       }
     }
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SAP Copilot Auto-Sync & Traffic Recorder",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Automatically syncs SAP cookies, records student actions, and bridges SAP requests for Cloudflare Pages and Local Sales Assistant.",
   "permissions": [
     "cookies",
