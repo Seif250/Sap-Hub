@@ -1821,24 +1821,29 @@
       }
     }
 
-    // Registrations table ID & row count (FPM_LIST_UIBB_ATS.ID_00010018:LIST_VIEW.DYNAMIC_TABLE)
+    // Registrations table ID & row count (FPM_LIST_UIBB_ATS.LIST_VIEW.DYNAMIC_TABLE or SapTableCS control update)
     let regListTableId = null;
     const regTableM =
-      dec.match(/id="(WD[0-9A-F]+)"[^>]*data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE/i) ||
-      dec.match(/data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE[^"]*id="(WD[0-9A-F]+)"/i);
+      dec.match(/id="(WD[0-9A-F]+)"[^>]*data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE/i) ||
+      dec.match(/data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE[^"]*id="(WD[0-9A-F]+)"/i) ||
+      dec.match(/<control-update\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*updateMethod="PARTIAL"[^>]*><content><!\[CDATA\[<table\b[^>]*\b(?:iVisibleContentRowCount|iContentRowCount)/i) ||
+      dec.match(/<(?:table|div)\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*\bct="STCS"[^>]*lsdata='\{[^']*?["']0["']\s*:\s*["']LIST_VIEW/i);
     if (regTableM) {
       regListTableId = regTableM[1];
     }
     const hasSpacerFragment = /bIsSpacerFragment="true"/i.test(dec);
-    const tableCrcM = (regListTableId ? dec.match(new RegExp(`id="${regListTableId}"[^>]*crc="(\\d+)"`, "i")) : null) ||
-      dec.match(/data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE"[^>]*crc="(\d+)"/i);
+    const tableCrcM =
+      (regListTableId ? dec.match(new RegExp(`id="${regListTableId}"[^>]*crc="(\\d+)"`, "i")) : null) ||
+      dec.match(/data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE"[^>]*crc="(\d+)"/i) ||
+      dec.match(/<table\b[^>]*\biContentRowCount="(\d+)"/i) ||
+      dec.match(/<table\b[^>]*\biVisibleContentRowCount="(\d+)"/i);
     const regRowCount = tableCrcM ? parseInt(tableCrcM[1], 10) : 0;
 
     // TAC checkbox(es) in registration table (LIST_VIEW.TAC_FPM_CE) — supports single & multi-term rows
     // Note: SAP Web Dynpro (FPM_LIST_UIBB_ATS) only emits data-hint="...LIST_VIEW.TAC_FPM_CE..." on Row 1 (rr="1")
-    // and the column header, NOT on Row 2 (rr="2"), Row 3 (rr="3"), etc. So we scan all <tr rr="k"> rows
-    // of the entire LIST_VIEW table (which spans multiple <tbody iRowIndexOffset="..."> fragments)
-    // and pick the Terms & Conditions checkbox (last checkbox column in each row).
+    // and the column header, NOT on Row 2 (rr="2"), Row 3 (rr="3"), etc., nor in subsequent delta updates!
+    // So we scan all <tr rr="k"> rows of the entire LIST_VIEW table (which spans multiple <tbody iRowIndexOffset="..."> fragments)
+    // and pick the Terms & Conditions checkbox (last checkbox column in each row, excluding ct="CB" ComboBoxes).
     let tacCheckboxId = null;
     const tacCheckboxIds = [];
     const uncheckedTacCheckboxIds = [];
@@ -1846,10 +1851,12 @@
 
     const recordTacTag = (cbTag) => {
       if (!cbTag || /CPT_FPM_HEADER/i.test(cbTag)) return;
+      // Strictly exclude ComboBox dropdowns (ct="CB")
+      if (/\bct="CB\b/i.test(cbTag)) return;
       const idM = cbTag.match(/\bid="(WD[0-9A-F]+)"/i);
       if (!idM) return;
       const id = idM[1];
-      const isChecked = /aria-checked="true"/i.test(cbTag) || /["']1["']\s*:\s*true/i.test(cbTag);
+      const isChecked = /aria-checked="true"/i.test(cbTag) || /["']1["']\s*:\s*true/i.test(cbTag) || /\bchecked\b/i.test(cbTag);
       if (!seenTacIds.has(id)) {
         seenTacIds.add(id);
         tacCheckboxIds.push(id);
@@ -1859,38 +1866,35 @@
       }
     };
 
-    // 1. Find the non-header LIST_VIEW.TAC_FPM_CE inside Row 1 (<tr rr="1">) and scan its enclosing
-    // table (...-mrss-cont-none-content) containing all tbody row fragments.
-    let dataTacIdx = -1;
-    const tacFindRe = /<[^>]*LIST_VIEW\.TAC_FPM_CE[^>]*>/gi;
-    let tfm;
-    while ((tfm = tacFindRe.exec(dec)) !== null) {
-      if (/CPT_FPM_HEADER/i.test(tfm[0])) continue;
-      dataTacIdx = tfm.index;
-      break;
-    }
+    const isCheckboxTag = (tag) => {
+      if (!tag || /\bct="CB\b/i.test(tag) || /^<label\b/i.test(tag) || /\bct="L\b/i.test(tag)) return false;
+      return (
+        /\bct="(?:C|CBX|C_standards)"/i.test(tag) ||
+        /\brole="checkbox"/i.test(tag) ||
+        /\bclass="[^"]*lsCheckBox/i.test(tag) ||
+        /TAC_FPM_CE/i.test(tag) ||
+        /\btype="checkbox"/i.test(tag)
+      );
+    };
 
-    if (dataTacIdx !== -1) {
-      const tblStart = dec.lastIndexOf("<table", dataTacIdx);
-      const tblEndIdx = dec.indexOf("</table>", dataTacIdx);
-      const tblEnd = tblEndIdx !== -1 ? Math.min(dec.length, tblEndIdx + 8) : Math.min(dec.length, dataTacIdx + 45000);
-      const listViewTableHtml = dec.slice(tblStart !== -1 ? tblStart : Math.max(0, dataTacIdx - 2000), tblEnd);
-
-      const trRe = /<tr\b[^>]*\brr="(\d+)"[^>]*>([\s\S]*?)<\/tr>/gi;
-      let trMatch;
-      while ((trMatch = trRe.exec(listViewTableHtml)) !== null) {
-        const rr = parseInt(trMatch[1], 10);
-        if (!rr || rr < 1) continue;
-        const rowHtml = trMatch[2];
-        const cbTags = Array.from(
-          rowHtml.matchAll(/<(?:span|input)\b[^>]*\bct="(?:C|CB|C_standards)"[^>]*>/gi)
-        ).map((m) => m[0]);
-        if (cbTags.length === 0) continue;
-        const explicitTac = cbTags.find((t) => /LIST_VIEW\.TAC_FPM_CE/i.test(t));
-        // In LIST_VIEW, "Terms and Conditions" is the last column (after "Vario")
-        const chosenTag = explicitTac || cbTags[cbTags.length - 1];
-        recordTacTag(chosenTag);
-      }
+    // 1. Scan ALL table rows <tr rr="k"> across dec (excluding popup table V_LIST)
+    const trRe = /<tr\b[^>]*\brr="(\d+)"[^>]*>([\s\S]*?)<\/tr>/gi;
+    let trMatch;
+    while ((trMatch = trRe.exec(dec)) !== null) {
+      if (/V_LIST/i.test(trMatch[0])) continue; // Ignore search popup table rows
+      const rr = parseInt(trMatch[1], 10);
+      if (!rr || rr < 1) continue;
+      const rowHtml = trMatch[2];
+      const cbTags = Array.from(
+        rowHtml.matchAll(/<(?:span|input|div)\b[^>]*>/gi)
+      )
+        .map((m) => m[0])
+        .filter(isCheckboxTag);
+      if (cbTags.length === 0) continue;
+      const explicitTac = cbTags.find((t) => /LIST_VIEW\.TAC_FPM_CE/i.test(t));
+      // In LIST_VIEW, "Terms and Conditions" is the last checkbox column (after "Vario")
+      const chosenTag = explicitTac || cbTags[cbTags.length - 1];
+      recordTacTag(chosenTag);
     }
 
     // 2. Also scan any direct tags with LIST_VIEW.TAC_FPM_CE (in case of partial cell-only delta updates)
@@ -1898,13 +1902,13 @@
     let tacM;
     while ((tacM = tacHintRe.exec(dec)) !== null) {
       const tag = tacM[0];
-      if (/CPT_FPM_HEADER/i.test(tag) || /^<label\b/i.test(tag) || /\bct="L"/i.test(tag)) continue;
-      if (/\bct="(?:C|CB|C_standards)"/i.test(tag)) {
+      if (/CPT_FPM_HEADER/i.test(tag) || /^<label\b/i.test(tag) || /\bct="L\b/i.test(tag)) continue;
+      if (isCheckboxTag(tag)) {
         recordTacTag(tag);
       } else {
         const chunk = dec.slice(tacM.index, tacM.index + 1200);
-        const innerCheck = chunk.match(/<(?:span|input)\b[^>]*\bct="(?:C|CB|C_standards)"[^>]*>/i);
-        if (innerCheck) recordTacTag(innerCheck[0]);
+        const innerCheck = chunk.match(/<(?:span|input|div)\b[^>]*>/i);
+        if (innerCheck && isCheckboxTag(innerCheck[0])) recordTacTag(innerCheck[0]);
       }
     }
 

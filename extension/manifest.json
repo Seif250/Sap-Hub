@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "SAP Copilot Auto-Sync & Traffic Recorder",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Automatically syncs SAP cookies, records student actions, and bridges SAP requests for Cloudflare Pages and Local Sales Assistant.",
   "permissions": [
     "cookies",
     "alarms",
-    "declarativeNetRequest"
+    "storage"
   ],
   "host_permissions": [
     "*://*.britishcouncil.org/*",
@@ -26,7 +26,9 @@
         "https://prd-sap.sms.britishcouncil.org/*",
         "https://sms.britishcouncil.org/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     },
     {
@@ -38,13 +40,21 @@
         "http://127.0.0.1/*",
         "https://*/*"
       ],
-      "js": ["hub-bridge.js"],
+      "exclude_matches": [
+        "*://*.britishcouncil.org/*",
+        "*://*.microsoftonline.com/*"
+      ],
+      "js": [
+        "hub-bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inject.js"],
+      "resources": [
+        "inject.js"
+      ],
       "matches": [
         "https://prd-sap.sms.britishcouncil.org/*",
         "https://sms.britishcouncil.org/*"

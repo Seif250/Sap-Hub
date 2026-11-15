@@ -67,12 +67,14 @@
 
     xhr.addEventListener("load", function() {
       try {
+        // Only read responseText for text/default responses (avoid DOMException on blob/arraybuffer/document)
+        if (xhr.responseType && xhr.responseType !== "text") return;
         const responseText = xhr.responseText || "";
         const status = xhr.status;
 
-        // Dispatch captured event to content script (capture full registration & webgui responses)
+        // Dispatch captured event to content script (bounded size to prevent SAP page UI freeze)
         const isLargeScreen = url.includes("webgui") || url.includes("zher_wa_registration") || requestBody.includes("ZHER_WA_REGISTRATION") || actionDesc.includes("Account balance") || actionDesc.includes("Registration");
-        const maxSnippetLen = isLargeScreen ? 800000 : 120000;
+        const maxSnippetLen = isLargeScreen ? 300000 : 80000;
         window.postMessage({
           source: "SAP_COPILOT_RECORDER",
           type: "XHR_COMPLETED",
@@ -87,9 +89,7 @@
           responseLength: responseText.length,
           timestamp: new Date().toISOString()
         }, "*");
-      } catch (e) {
-        console.error("[SAP Copilot] Error capturing response:", e);
-      }
+      } catch (e) {}
     });
 
     return rawSend.apply(this, arguments);

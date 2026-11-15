@@ -153,7 +153,7 @@
     return html`<aside className=${`app-sidebar ${collapsed ? "collapsed" : ""} w-[196px] shrink-0 border-r flex flex-col p-3 gap-1`} style=${{ borderColor: "var(--line)", background: "#fbfcfe" }}>
       <button className="sidebar-toggle btn btn-icon mb-2" title=${collapsed ? "Expand navigation" : "Collapse navigation"} onClick=${() => setCollapsed((v) => !v)}><${Icon} name=${collapsed ? "chevRight" : "chevLeft"} size=${15} /></button>
       ${NAV.map(item)}
-      <div className="mt-auto px-2 text-[11px] muted flex items-center gap-2"><span className="w-1.5 h-1.5 rounded-full bg-green-600"></span>v2.0 · local</div>
+      <div className="mt-auto px-2 text-[11px] muted flex items-center gap-2"><span className="w-1.5 h-1.5 rounded-full bg-green-600"></span>v2.1 · ${typeof window !== "undefined" && window.location.hostname.includes("pages.dev") ? "cloudflare" : "local"}</div>
     </aside>`;
   }
 

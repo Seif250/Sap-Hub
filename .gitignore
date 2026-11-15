@@ -1,0 +1,8 @@
+active_cookie.txt
+traffic_logs/*.jsonl
+traffic_logs/*.xml
+traffic_logs/*.ps1
+*.log
+.DS_Store
+Thumbs.db
+

@@ -1386,11 +1386,37 @@
     return resultsByBranch;
   }
 
+  function deduceCentreKeyFromClassOrBranch(className, fallbackKey) {
+    const s = String(className || "").toUpperCase();
+    if (/\b(BSA|ALX)\b/.test(s) || s.startsWith("BSA") || s.startsWith("ALX")) {
+      return "05001354"; // Alex
+    }
+    if (/\bCTS\b/.test(s) || s.startsWith("CTS") || s.includes("CITYSTARS")) {
+      return "05001353"; // CityStars
+    }
+    if (/\bOCT\b/.test(s) || s.startsWith("OCT") || s.includes("OCTOBER")) {
+      return "05001355"; // 6th of October
+    }
+    if (/\bHEL\b/.test(s) || s.startsWith("HEL") || s.includes("HELIOPOLIS")) {
+      return "05001352"; // Heliopolis
+    }
+    if (/\bAIS\b/.test(s) || s.startsWith("AIS") || s.includes("ASPIRE") || s.includes("NEW CAIRO")) {
+      return "05001677"; // New Cairo
+    }
+    if (/\bAGU\b/.test(s) || s.startsWith("AGU") || s.includes("AGOUZA")) {
+      return "05001351"; // Agouza
+    }
+    return fallbackKey || "05001351";
+  }
+
   function extractClassSearchHint(className) {
     const s = String(className || "").trim();
-    // 1. BCE Month pattern: e.g. "Sep26", "Jan26", "Oct26", "Mar 27", "Nov 26"
-    const bceMonth = s.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*\d{0,2}\b/i);
-    if (bceMonth) return bceMonth[0].replace(/\s+/g, "");
+    // 1. BCE Month pattern: e.g. "Sep", "Jan", "Oct", "Mar", "Nov"
+    // Apply ONLY if class is BCE or British Council English
+    if (/\b(?:BCE|British\s*Council\s*English|\d{1,2}L)\b/i.test(s)) {
+      const bceMonth = s.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i);
+      if (bceMonth) return bceMonth[1];
+    }
 
     // 2. Beginner sub-level: e.g. "Beg A", "Beg B", "Beg C", "Beg D"
     const begMatch = s.match(/\b(Beg\s+[A-E])\b/i);
@@ -1405,8 +1431,68 @@
     return "";
   }
 
+  function deduceItemCourseSuffix(item) {
+    if (item && item._courseCode) {
+      const parts = item._courseCode.split("-");
+      if (parts.length > 1) return parts.slice(1).join("-").trim();
+    }
+    const cls = String((item && item.className) || "");
+    if (/\b(AD Beg|Beginner|Beg\s+[A-E])\b/i.test(cls)) return "AD Beg";
+    if (/\b(?:BCE|British\s*Council\s*English|\d{1,2}L(?:\s*\/\s*\d{1,2}M)?)\b/i.test(cls)) return "BCE";
+    if (/\bIELTS\b/i.test(cls)) return "IELTS";
+    if (/\b(Owls|EY3)\b/i.test(cls)) return "EY3";
+    if (/\b(Ducks|EY2)\b/i.test(cls)) return "EY2";
+    if (/\bEY1\b/i.test(cls)) return "EY1";
+    const ppM = cls.match(/\b(?:PriPlus|Primary\s*Plus\s*)(\d)\b/i);
+    if (ppM) return `PP${ppM[1]}`;
+    const secM = cls.match(/\b(?:SecPlus|Secondary\s*Plus\s*)([A-C][12](?:\.[12])?)\b/i);
+    if (secM) return `S${secM[1].toUpperCase()}`;
+    const usM = cls.match(/\b(?:Upper\s*Sec(?:ondary)?|US\s*)([A-C][12](?:\.[12])?)\b/i);
+    if (usM) return `US${usM[1].toUpperCase()}`;
+    const pstM = cls.match(/\b(?:Starter|PSt)\s*([AB])\b/i);
+    if (pstM) return `PSt${pstM[1].toUpperCase()}`;
+    return "BCE";
+  }
+
+  function groupClassesForBooking(items, defaultCentreKey) {
+    const groupsMap = new Map();
+    items.forEach((it) => {
+      let cKey = deduceCentreKeyFromClassOrBranch(it.className, it._centreKey || defaultCentreKey);
+      const suffix = deduceItemCourseSuffix(it);
+      const gKey = `${cKey}__${suffix}`;
+      if (!groupsMap.has(gKey)) {
+        const cObj = SAP.TEACHING_CENTRES.find((c) => c.key === cKey) || SAP.TEACHING_CENTRES[0];
+        groupsMap.set(gKey, {
+          key: gKey,
+          centreKey: cKey,
+          centreCode: (cObj && cObj.code) || "AGU",
+          centreName: (cObj && cObj.shortName) || "Agouza",
+          courseSuffix: suffix,
+          courseCode: it._courseCode || `${(cObj && cObj.code) || "AGU"}-${suffix}`,
+          items: [],
+          earliestStartDateNum: 99999999,
+        });
+      }
+      const grp = groupsMap.get(gKey);
+      grp.items.push(it);
+      const sNum = SAP.parseSapDateToNum(it.startDate || it.start) || 99999999;
+      if (sNum < grp.earliestStartDateNum) grp.earliestStartDateNum = sNum;
+    });
+
+    const groups = Array.from(groupsMap.values());
+    // Explicit priority: Book BCE first, then Beg, then chronological
+    groups.sort((a, b) => {
+      const isBceA = a.courseSuffix === "BCE";
+      const isBceB = b.courseSuffix === "BCE";
+      if (isBceA && !isBceB) return -1;
+      if (!isBceA && isBceB) return 1;
+      return a.earliestStartDateNum - b.earliestStartDateNum;
+    });
+    return groups;
+  }
+
   /**
-   * Executes the booking in SAP (supports single class or multi-term/multi-class cart):
+   * Executes the booking of a single course group in SAP:
    * - Adds 1st class from Course Search popup -> Presses OK
    * - For any additional classes in classItems: clicks Add reservation/waitlist -> filters by class -> Selects row + Presses OK
    * - Checks ALL Terms & Conditions checkboxes (LIST_VIEW.TAC_FPM_CE) across all rows
@@ -1414,7 +1500,7 @@
    * - Young Learner: Switches to Header data -> Selects Guardian -> Fills Collector Start/End Dates -> Presses Save
    * - Immediately exits ZHER_WA_REGISTRATION (presses Back) so SAP releases the EZ_COURSE_REG lock
    */
-  async function bookClassInSap({
+  async function _bookSingleGroupInSap({
     studentId,
     centreKey,
     courseCode,
@@ -1442,10 +1528,7 @@
     }
 
     let firstItem = itemsToBook[0];
-    let primaryCentreKey = firstItem._centreKey || centreKey;
-    if (/\b(BSA|ALX)\b/i.test(firstItem.className || "") && !primaryCentreKey.startsWith("05001354")) {
-      primaryCentreKey = "05001354";
-    }
+    let primaryCentreKey = deduceCentreKeyFromClassOrBranch(firstItem.className, firstItem._centreKey || centreKey);
     const primaryCourseCode = firstItem._courseCode || courseCode;
     let rs = regSession;
 
@@ -1749,8 +1832,8 @@
 
         let matchedClass = findMatchedClass(fClasses);
 
-        // Fallback: If targeted hint returned 0 rows, clear classDesc filter and re-search to see all classes
-        if (!matchedClass && fClasses.length === 0 && curCtl.classDescInputId) {
+        // Fallback: If targeted hint did not find the target class, clear classDesc filter and re-search to see all classes
+        if (!matchedClass && curCtl.classDescInputId) {
           const resetEvents = [
             `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`,
             `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
@@ -1880,7 +1963,7 @@
         // For multi-class bookings (row index >= 1), WebDynpro loads rows >= 2 as lazy spacer fragments
         // (bIsSpacerFragment="true"). Scroll / request the new row in the Registration table (LIST_VIEW)
         // so SAP renders its cells and its Terms & Conditions checkbox.
-        const regTableId = rs.controls.regListTableId || "WD03FC";
+        const regTableId = rs.controls.regListTableId || "WDDF";
         if (idx > 0 || rs.controls.hasSpacerFragment) {
           onStep && onStep(`Loading registration row ${idx + 1} for "${item.className}"…`);
           const scrollRegQueue =
@@ -1917,7 +2000,7 @@
 
       // After adding and checking all classes, if multiple items were added, scroll back to top and do a final sweep
       if (itemsToBook.length > 1) {
-        const regTableId = rs.controls.regListTableId || "WD03FC";
+        const regTableId = rs.controls.regListTableId || "WDDF";
         const topScrollQ =
           `SapTable_VerticalScroll~E002Id~E004${regTableId}~E005FirstVisibleItemIndex~E0040~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
           `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
@@ -2112,8 +2195,52 @@
         }
       }
 
-      const messages = SAP.parseSapMessages(finalSaveRes.body);
-      const hasError = messages.some((m) => m.type === "ERROR");
+      let messages = SAP.parseSapMessages(finalSaveRes.body);
+      let hasError = messages.some((m) => m.type === "ERROR");
+
+      // Auto-retry safety net: If SAP rejected Save with "Please agree to the terms and conditions",
+      // immediately check all remaining row checkboxes and re-press Save!
+      const termsError = messages.some((m) => /terms\s+and\s+conditions/i.test(m.text));
+      if (termsError) {
+        onStep && onStep("Terms & conditions required by SAP. Re-checking all rows…");
+        rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(finalSaveRes.body));
+
+        // If uncheckedTacCheckboxIds is still empty, scroll through all rows to force SAP to render them
+        const regTableId = rs.controls.regListTableId || "WDDF";
+        const rowCount = Math.max(rs.controls.regRowCount || 0, itemsToBook.length);
+        if (!rs.controls.uncheckedTacCheckboxIds || rs.controls.uncheckedTacCheckboxIds.length === 0) {
+          for (let rIdx = 0; rIdx < rowCount; rIdx++) {
+            const scrollQ =
+              `SapTable_VerticalScroll~E002Id~E004${regTableId}~E005FirstVisibleItemIndex~E004${rIdx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
+              `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+            const sRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, scrollQ) });
+            if (sRes.ok && sRes.body) {
+              rs.cookie = SAP.mergeCookies(rs.cookie, sRes.setCookie);
+              rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(sRes.body));
+            }
+          }
+        }
+
+        // Check any remaining unchecked checkboxes
+        await checkAllUncheckedTac("Accepting Terms & Conditions in SAP…");
+
+        // Re-press Save
+        const saveBtnId = rs.controls.saveBtn || (isAdult ? "WD0285" : "WD025F");
+        onStep && onStep("Re-saving booking in SAP…");
+        const retrySaveQueue = SAP.buildButtonPressQueue(saveBtnId);
+        finalSaveRes = await proxy({
+          url: rs.contextUrl,
+          method: "POST",
+          cookie: rs.cookie,
+          body: postRegBody(rs.secureId, retrySaveQueue),
+        });
+        if (finalSaveRes.ok && finalSaveRes.body) {
+          rs.cookie = SAP.mergeCookies(rs.cookie, finalSaveRes.setCookie);
+          rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(finalSaveRes.body));
+          messages = SAP.parseSapMessages(finalSaveRes.body);
+          hasError = messages.some((m) => m.type === "ERROR");
+        }
+      }
 
       // Immediately release the SAP Registration session (press Back) so EZ_COURSE_REG is unlocked!
       await releaseRegistrationSession(onStep);
@@ -2130,9 +2257,103 @@
     }
   }
 
+  /**
+   * Top-level bookClassInSap:
+   * If all selected classes belong to the same course & branch, runs a single SAP registration session.
+   * If classes span multiple courses (e.g. BCE + Beginner) or multiple branches:
+   * Groups classes by course/branch, sorts them (BCE first, then Beginner, then chronological),
+   * and registers each group in its own SAP registration session, releasing and saving each one cleanly.
+   */
+  async function bookClassInSap(opts) {
+    const {
+      studentId,
+      centreKey,
+      classItem,
+      classItems,
+      onStep,
+    } = opts;
+    const cleanId = String(studentId || "").padStart(10, "0");
+    const itemsToBook =
+      Array.isArray(classItems) && classItems.length > 0
+        ? classItems.slice()
+        : classItem
+          ? [classItem]
+          : [];
+    if (itemsToBook.length === 0) {
+      throw new Error("No classes selected for booking.");
+    }
+
+    const firstItem = itemsToBook[0];
+    let primaryCentreKey = firstItem._centreKey || centreKey;
+    if (/\b(BSA|ALX)\b/i.test(firstItem.className || "") && !primaryCentreKey.startsWith("05001354")) {
+      primaryCentreKey = "05001354";
+    }
+
+    const bookingGroups = groupClassesForBooking(itemsToBook, primaryCentreKey);
+    if (bookingGroups.length <= 1) {
+      return _bookSingleGroupInSap(opts);
+    }
+
+    // Multi-course or multi-registration booking (e.g. BCE + Beginner)
+    const allMessages = [];
+    const allBooked = [];
+    for (let gIdx = 0; gIdx < bookingGroups.length; gIdx++) {
+      const grp = bookingGroups[gIdx];
+      const stepHeader = `Registration ${gIdx + 1} of ${bookingGroups.length}: Booking ${grp.courseSuffix || "course"} (${grp.items.length} ${grp.items.length === 1 ? "class" : "classes"}) in SAP…`;
+      onStep && onStep(stepHeader);
+
+      // Ensure any leftover registration session is released before starting the new course group
+      await releaseRegistrationSession(onStep).catch(() => {});
+
+      // Determine year specifically for this group from its first item's start date
+      const groupStartYear = (grp.items[0].startDate && grp.items[0].startDate.match(/\b(20\d{2})\b/)?.[1])
+        || (grp.items[0].start && grp.items[0].start.match(/\b(20\d{2})\b/)?.[1])
+        || grp.items[0].year
+        || opts.year;
+
+      const grpRes = await _bookSingleGroupInSap({
+        ...opts,
+        centreKey: grp.centreKey,
+        courseCode: grp.courseCode,
+        year: groupStartYear,
+        classItem: grp.items[0],
+        classItems: grp.items,
+        onStep: (msg) => onStep && onStep(`[${gIdx + 1}/${bookingGroups.length} - ${grp.courseSuffix}] ${msg}`),
+      });
+
+      if (grpRes.messages && Array.isArray(grpRes.messages)) {
+        allMessages.push(...grpRes.messages);
+      }
+
+      if (!grpRes.ok) {
+        return {
+          ok: false,
+          messages: allMessages,
+          classItem: grp.items[0],
+          classItems: itemsToBook,
+          bookedClasses: allBooked,
+          failedGroup: grp,
+          failedIndex: gIdx,
+        };
+      }
+      allBooked.push(...grp.items);
+    }
+
+    return {
+      ok: true,
+      messages: allMessages,
+      classItem: itemsToBook[0],
+      classItems: itemsToBook,
+      bookedClasses: allBooked,
+      groupCount: bookingGroups.length,
+    };
+  }
+
   global.SapService = {
     getCookie, setCookie, hasCookie, fetchServerSyncedCookie, detectQuery, connect, testAndSave, search, openStudent,
     searchAvailableClasses, searchAllBranchesSchedules, bookClassInSap, releaseRegistrationSession,
+    groupClassesForBooking: (items, defaultCentreKey) => groupClassesForBooking(items, defaultCentreKey),
+    deduceCentreKeyFromClassOrBranch: (className, fallbackKey) => deduceCentreKeyFromClassOrBranch(className, fallbackKey),
     getCachedGuardians: (studentId) =>
       (regSession && regSession.controls && regSession.controls.guardiansList) ||
       (studentId ? lastGuardiansByStudent[String(studentId).padStart(10, "0")] : Object.values(lastGuardiansByStudent)[0]) ||

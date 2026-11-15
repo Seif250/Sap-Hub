@@ -396,11 +396,9 @@
       setConfirmClasses(null);
       if (!studentId || bookingBusyId || items.length === 0) return;
       const firstCls = items[0];
-      let targetCentreKey = firstCls._centreKey || selectedCentreKey;
-      if (/\b(BSA|ALX)\b/i.test(firstCls.className || "") && !targetCentreKey.startsWith("05001354")) {
-        const alx = centres.find((c) => c.code === "ALX");
-        if (alx) targetCentreKey = alx.key;
-      }
+      let targetCentreKey = (Svc && Svc.deduceCentreKeyFromClassOrBranch)
+        ? Svc.deduceCentreKeyFromClassOrBranch(firstCls.className, firstCls._centreKey || selectedCentreKey)
+        : (firstCls._centreKey || selectedCentreKey);
       const cObj = centres.find((c) => c.key === targetCentreKey) || activeCentre;
       const classYear = firstCls.year || (firstCls.startDate && firstCls.startDate.match(/\b(20\d{2})\b/)?.[1]) || year;
       const itemKey = items.length > 1 ? "CART_BULK" : `${targetCentreKey}_${firstCls.rowIndex}_${firstCls.className}`;
@@ -424,21 +422,24 @@
           collectorEndDate: collectorEndDate || (SAPC.addOneYearToSapDate && SAPC.addOneYearToSapDate(firstCls.startDate)) || firstCls.endDate,
           onStep: (msg) => setStepMsg(msg),
         });
-        if (res.ok) {
-          const bookedKeys = new Set(items.map((c) => getCartKey(c)));
+
+        const bookedItems = (res.bookedClasses && res.bookedClasses.length > 0) ? res.bookedClasses : (res.ok ? items : []);
+        if (bookedItems.length > 0) {
+          const bookedKeys = new Set(bookedItems.map((c) => getCartKey(c)));
           setCartClasses((prev) => prev.filter((c) => !bookedKeys.has(getCartKey(c))));
-          onBookingCompleted && onBookingCompleted(items, {
+          onBookingCompleted && onBookingCompleted(bookedItems, {
             bookingAction,
             centreName: cleanName(cObj && cObj.shortName),
             courseSuffix,
             messages: res.messages || [],
           });
         }
+
         setBookingResult({
           ok: res.ok,
           bookingAction,
           className: firstCls.className,
-          bookedClasses: items,
+          bookedClasses: bookedItems.length > 0 ? bookedItems : items,
           centreName: cleanName(cObj && cObj.shortName),
           messages: res.messages || [],
         });
@@ -1034,16 +1035,21 @@
         `}
       </div>
 
-      ${confirmClasses && confirmClasses.length > 0 && html`
+      ${confirmClasses && confirmClasses.length > 0 && (() => {
+        const confirmGroups = (Svc && Svc.groupClassesForBooking) ? Svc.groupClassesForBooking(confirmClasses, selectedCentreKey) : [];
+        const isMultiGroup = confirmGroups.length > 1;
+        return html`
         <div className="fixed inset-0 z-[60] grid place-items-center" style=${{ background: "rgba(15,23,42,0.35)" }}>
           <div className="bg-white rounded-[12px] shadow-2xl p-5 w-[520px] max-w-[95vw] space-y-3">
             <div className="font-semibold text-[15px] flex items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <${Icon} name="alert" size=${17} className="text-amber-600" />
-                <span>${confirmClasses.length > 1 ? `Confirm Multi-Term Booking (${confirmClasses.length} Terms)` : "Confirm booking in SAP"}</span>
+                <span>${confirmClasses.length > 1 ? (isMultiGroup ? `Confirm Multi-Course Booking (${confirmClasses.length} Classes)` : `Confirm Multi-Term Booking (${confirmClasses.length} Terms)`) : "Confirm booking in SAP"}</span>
               </span>
               ${confirmClasses.length > 1 && html`
-                <span className="pill pill-green !text-[10.5px] font-bold">Bundle · ${confirmClasses.length} Terms</span>
+                <span className="pill pill-green !text-[10.5px] font-bold">
+                  ${isMultiGroup ? `Bundle · ${confirmClasses.length} Classes · ${confirmGroups.length} Registrations (${confirmGroups.map((g) => g.courseSuffix).join(" then ")})` : `Bundle · ${confirmClasses.length} Terms`}
+                </span>
               `}
             </div>
             <div className="text-[12.5px] space-y-1.5">
@@ -1107,18 +1113,21 @@
 
             <div className="text-[11.5px] muted">
               ${model && !model.isAdult
-                ? `This will add ${confirmClasses.length > 1 ? `all ${confirmClasses.length} classes` : "the class"} to one SAP registration, accept Terms & Conditions for each row, assign the Guardian & Collector validity dates in Header data, save in SAP, and immediately unlock EZ_COURSE_REG.`
-                : `This will create a real ${bookingAction === "waitlist" ? "waitlist booking" : "reservation"} for ${confirmClasses.length > 1 ? `all ${confirmClasses.length} classes` : "the selected class"} in SAP, accept Terms & Conditions, and unlock EZ_COURSE_REG.`}
+                ? `This will add ${confirmClasses.length > 1 ? `all ${confirmClasses.length} classes` : "the class"} to SAP registration, accept Terms & Conditions for each row, assign the Guardian & Collector validity dates in Header data, save in SAP, and immediately unlock EZ_COURSE_REG.`
+                : isMultiGroup
+                  ? `This will automatically create ${confirmGroups.length} separate registrations in SAP (${confirmGroups.map((g) => `${g.items.length} in ${g.courseSuffix}`).join(", ")}), accept Terms & Conditions for each, and unlock EZ_COURSE_REG.`
+                  : `This will create a real ${bookingAction === "waitlist" ? "waitlist booking" : "reservation"} for ${confirmClasses.length > 1 ? `all ${confirmClasses.length} classes` : "the selected class"} in SAP, accept Terms & Conditions, and unlock EZ_COURSE_REG.`}
             </div>
             <div className="flex justify-end gap-2 pt-1">
               <button type="button" className="btn" onClick=${() => setConfirmClasses(null)}>Cancel</button>
               <button type="button" className="btn btn-primary" onClick=${() => bookClasses(confirmClasses)}>
                 <${Icon} name="check" size=${14} />
-                ${confirmClasses.length > 1 ? `Confirm & Book (${confirmClasses.length} Terms)` : "Confirm & Book"}
+                ${confirmClasses.length > 1 ? (isMultiGroup ? `Confirm & Book (${confirmClasses.length} Classes in ${confirmGroups.length} Registrations)` : `Confirm & Book (${confirmClasses.length} Terms)`) : "Confirm & Book"}
               </button>
             </div>
           </div>
-        </div>`}
+        </div>`;
+      })()}
 
       ${bookingResult && bookingResult.ok && html`
         <div className="fixed inset-0 z-[70] grid place-items-center" style=${{ background: "rgba(15,23,42,0.55)", backdropFilter: "blur(2px)" }}>

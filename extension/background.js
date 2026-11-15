@@ -1,19 +1,23 @@
 // ============================================================================
-// SAP Copilot Auto-Sync Extension - Background Service Worker (v1.2.1 - Turbo)
-// - Ultra-low latency Direct Extension Bridge for Cloudflare Pages & Web UI
-// - In-memory cookie caching (0ms overhead on proxy requests)
+// SAP Copilot Auto-Sync Extension - Background Service Worker (v1.2.2)
+// - Isolated Direct Extension Bridge (NEVER touches open SAP browser tabs!)
+// - Strict tabIds:[-1] + excludedInitiatorDomains DNR scoping & cleanup
+// - Zero global cookie-jar mutation during SAP_PROXY requests
 // ============================================================================
 
+const SAP_TARGET_URL = "https://prd-sap.sms.britishcouncil.org/sap/bc/webdynpro/sap/z_her_wa_student";
 const SAP_DOMAINS = [
   "prd-sap.sms.britishcouncil.org",
   "sms.britishcouncil.org",
   "britishcouncil.org"
 ];
 const LOCAL_ENDPOINT = "http://localhost:8787/api/sync-cookies";
-const DNR_RULE_ID = 8888;
+const DNR_RULE_BASE_ID = 8888;
+const DNR_RULE_MAX_SLOTS = 50;
 
 let lastSyncTime = null;
 let lastSyncedHash = "";
+let nextRuleSlot = 0;
 
 // In-memory cookie cache for instant zero-overhead responses
 let cachedCookies = {
@@ -23,18 +27,51 @@ let cachedCookies = {
   syncedAt: null
 };
 let isCookieRefreshing = false;
-let lastInjectedCookie = "";
-let lastDnrCookie = "";
-let lastDnrReferer = "";
 
 /**
- * Gathers and deduplicates all cookies from the British Council SAP domains.
+ * Removes any leftover DNR rules created by this extension so open SAP tabs are never affected.
+ */
+async function cleanupAllProxyDnrRules() {
+  try {
+    if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.getDynamicRules) return;
+    const existing = await chrome.declarativeNetRequest.getDynamicRules();
+    const idsToRemove = existing
+      .map((r) => r.id)
+      .filter((id) => id >= DNR_RULE_BASE_ID && id < DNR_RULE_BASE_ID + DNR_RULE_MAX_SLOTS + 10);
+    if (idsToRemove.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: idsToRemove });
+    }
+  } catch (e) {}
+}
+
+/**
+ * Safely writes to chrome.storage.local without throwing if unavailable.
+ */
+function safeStorageSet(obj) {
+  try {
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set(obj);
+    }
+  } catch (e) {}
+}
+
+/**
+ * Gathers and deduplicates cookies sent to prd-sap.sms.britishcouncil.org.
+ * Prioritizes host-only / exact-host SAP cookies over broader domain cookies.
  */
 async function refreshCachedCookies() {
   if (isCookieRefreshing) return cachedCookies;
   isCookieRefreshing = true;
   try {
     let allCookies = [];
+    try {
+      const exactList = await chrome.cookies.getAll({ url: SAP_TARGET_URL });
+      if (Array.isArray(exactList)) {
+        allCookies.push(...exactList);
+      }
+    } catch (e) {}
+
+    // Fallback/supplement from SAP_DOMAINS only for names not already collected
     for (const domain of SAP_DOMAINS) {
       try {
         const cList = await chrome.cookies.getAll({ domain });
@@ -44,8 +81,21 @@ async function refreshCachedCookies() {
       } catch (e) {}
     }
 
+    // Prefer host-only & exact prd-sap host cookies over broader .britishcouncil.org duplicates
+    allCookies.sort((a, b) => {
+      const score = (c) => {
+        let s = 0;
+        if (c.hostOnly) s += 4;
+        if (c.domain === "prd-sap.sms.britishcouncil.org") s += 2;
+        if (c.path && c.path.startsWith("/sap")) s += 1;
+        return s;
+      };
+      return score(b) - score(a);
+    });
+
     const cookieMap = new Map();
     allCookies.forEach((c) => {
+      // Skip unrelated marketing/consent cookies from root britishcouncil.org when collecting SAP auth
       if (!cookieMap.has(c.name)) {
         cookieMap.set(c.name, c.value);
       }
@@ -79,37 +129,61 @@ async function refreshCachedCookies() {
 }
 
 /**
- * Injects a cookie string into Chrome's cookie store (in parallel for high speed).
+ * Installs a strictly scoped, temporary DNR rule for a single background service worker fetch().
+ * Scoped with tabIds: [-1] and excludedInitiatorDomains: ["britishcouncil.org"] so open SAP tabs
+ * are NEVER touched. Also strips Set-Cookie on the proxy response so it never overwrites tab cookies.
  */
-async function injectCookiesIntoStore(cookieString, domain = "prd-sap.sms.britishcouncil.org") {
-  if (!cookieString || typeof cookieString !== "string" || cookieString === lastInjectedCookie) return;
-  lastInjectedCookie = cookieString;
-  const pairs = cookieString.split(";");
-  const promises = [];
-  for (const pair of pairs) {
-    const idx = pair.indexOf("=");
-    if (idx > 0) {
-      const name = pair.slice(0, idx).trim();
-      const value = pair.slice(idx + 1).trim();
-      if (name && value) {
-        promises.push(
-          chrome.cookies.set({
-            url: "https://" + domain,
-            name,
-            value,
-            domain: domain,
-            path: "/"
-          }).catch(() => {})
-        );
-      }
-    }
+async function installScopedDnrRule(ruleId, reqHeaders) {
+  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
+  const condition = {
+    urlFilter: "||prd-sap.sms.britishcouncil.org",
+    tabIds: [-1],
+    excludedInitiatorDomains: ["britishcouncil.org"],
+    resourceTypes: ["xmlhttprequest", "other"]
+  };
+
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [ruleId],
+      addRules: [{
+        id: ruleId,
+        priority: 999,
+        action: {
+          type: "modifyHeaders",
+          requestHeaders: reqHeaders,
+          responseHeaders: [{ header: "set-cookie", operation: "remove" }]
+        },
+        condition
+      }]
+    });
+  } catch (err) {
+    // Fallback if browser version rejects responseHeaders modification on set-cookie
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [ruleId],
+      addRules: [{
+        id: ruleId,
+        priority: 999,
+        action: {
+          type: "modifyHeaders",
+          requestHeaders: reqHeaders
+        },
+        condition
+      }]
+    }).catch(() => {});
   }
-  await Promise.all(promises);
+}
+
+async function removeScopedDnrRule(ruleId) {
+  try {
+    if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [ruleId] });
+    }
+  } catch (e) {}
 }
 
 /**
- * Turbo proxy handler for SAP Web Dynpro requests from Cloudflare Pages.
- * Optimized for maximum speed: zero sequential IPC calls, parallel processing.
+ * Isolated proxy handler for SAP Web Dynpro requests from SAP Hub.
+ * Never mutates Chrome's global cookie store and never modifies headers of open browser tabs.
  */
 async function handleSapProxy(payload) {
   if (!payload || !payload.url) {
@@ -122,50 +196,22 @@ async function handleSapProxy(payload) {
   const referer = payload.referer || "https://prd-sap.sms.britishcouncil.org/sap/bc/webdynpro/sap/z_her_wa_student?WDCONFIGURATIONID=Z_HER_AC_STUDENT";
   let cookie = payload.cookie || "";
 
-  // 1. Fast cookie resolution from cache
+  // 1. Resolve cookie from in-memory cache if caller didn't supply one (never write back to Chrome store!)
   if (!cookie) {
     if (!cachedCookies.cookie) {
       await refreshCachedCookies();
     }
     cookie = cachedCookies.cookie;
-  } else if (cookie !== lastInjectedCookie) {
-    // Only inject if cookie actually changed (parallelized)
-    injectCookiesIntoStore(cookie).catch(() => {});
   }
 
-  // 2. Fast DNR rule check: only update dynamic rules if headers actually changed
-  if (cookie !== lastDnrCookie || referer !== lastDnrReferer) {
-    lastDnrCookie = cookie;
-    lastDnrReferer = referer;
-    try {
-      if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.updateDynamicRules) {
-        const reqHeaders = [
-          { header: "Referer", operation: "set", value: referer },
-          { header: "Accept-Language", operation: "set", value: "en-GB,en;q=0.9,en-US;q=0.8" },
-          { header: "X-Requested-With", operation: "set", value: "XMLHttpRequest" },
-          { header: "X-XHR-Logon", operation: "set", value: "accept" }
-        ];
-        if (cookie) {
-          reqHeaders.push({ header: "Cookie", operation: "set", value: cookie });
-        }
-
-        chrome.declarativeNetRequest.updateDynamicRules({
-          removeRuleIds: [DNR_RULE_ID],
-          addRules: [{
-            id: DNR_RULE_ID,
-            priority: 999,
-            action: {
-              type: "modifyHeaders",
-              requestHeaders: reqHeaders
-            },
-            condition: {
-              urlFilter: "||prd-sap.sms.britishcouncil.org",
-              resourceTypes: ["xmlhttprequest"]
-            }
-          }]
-        }).catch(() => {});
-      }
-    } catch (ruleErr) {}
+  const reqHeaders = [
+    { header: "Referer", operation: "set", value: referer },
+    { header: "Accept-Language", operation: "set", value: "en-GB,en;q=0.9,en-US;q=0.8" },
+    { header: "X-Requested-With", operation: "set", value: "XMLHttpRequest" },
+    { header: "X-XHR-Logon", operation: "set", value: "accept" }
+  ];
+  if (cookie) {
+    reqHeaders.push({ header: "Cookie", operation: "set", value: cookie });
   }
 
   const fetchHeaders = {
@@ -177,6 +223,9 @@ async function handleSapProxy(payload) {
   if (method === "POST") {
     fetchHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8";
   }
+
+  const ruleId = DNR_RULE_BASE_ID + (nextRuleSlot++ % DNR_RULE_MAX_SLOTS);
+  await installScopedDnrRule(ruleId, reqHeaders);
 
   try {
     const controller = new AbortController();
@@ -194,12 +243,11 @@ async function handleSapProxy(payload) {
     const bodyText = await resp.text();
     const sessionState = resp.headers.get("sap-session-state") || "";
 
-    // Instantly return without blocking on chrome.cookies.getAll
     return {
       ok: resp.ok,
       status: resp.status,
       finalUrl: resp.url,
-      setCookie: cachedCookies.cookie || cookie,
+      setCookie: cookie || cachedCookies.cookie,
       sessionState: sessionState,
       body: bodyText
     };
@@ -210,6 +258,8 @@ async function handleSapProxy(payload) {
       error: "SAP Network Request Failed: " + (err.name === "AbortError" ? "Request timed out after 60s" : err.message),
       body: ""
     };
+  } finally {
+    await removeScopedDnrRule(ruleId);
   }
 }
 
@@ -242,18 +292,26 @@ async function syncCookiesToLocalAssistant() {
     if (resp.ok) {
       lastSyncTime = new Date();
       lastSyncedHash = active.cookie;
-      chrome.storage.local.set({
+      safeStorageSet({
         lastSync: lastSyncTime.toISOString(),
         hasSession: active.hasSession,
         status: "connected"
       });
     }
   } catch (err) {
-    chrome.storage.local.set({ status: "offline" });
+    safeStorageSet({ status: "offline" });
   }
 }
 
-// 1. Listen for real-time cookie updates on SAP domains
+// 1. Clean up any legacy/stale DNR rules on install/startup/boot
+chrome.runtime.onInstalled.addListener(() => {
+  cleanupAllProxyDnrRules();
+});
+chrome.runtime.onStartup.addListener(() => {
+  cleanupAllProxyDnrRules();
+});
+
+// 2. Listen for real-time cookie updates on SAP domains
 chrome.cookies.onChanged.addListener((changeInfo) => {
   const d = changeInfo.cookie.domain || "";
   if (SAP_DOMAINS.some((dom) => d.includes(dom))) {
@@ -263,7 +321,7 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
   }
 });
 
-// 2. Periodic heartbeat sync every 60 seconds
+// 3. Periodic heartbeat sync every 60 seconds
 chrome.alarms.create("sapCookieSyncAlarm", { periodInMinutes: 1.0 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "sapCookieSyncAlarm") {
@@ -273,7 +331,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// 3. Message handlers for Bridge and Popup
+// 4. Message handlers for Bridge and Popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.action) return false;
 
@@ -287,7 +345,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "GET_ACTIVE_COOKIES") {
     if (cachedCookies.cookie) {
       sendResponse(cachedCookies);
-      // Refresh in background
       refreshCachedCookies();
     } else {
       refreshCachedCookies().then((res) => {
@@ -311,5 +368,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// Initial warm-up
+// Initial warm-up & stale rule cleanup
+cleanupAllProxyDnrRules();
 refreshCachedCookies();

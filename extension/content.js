@@ -15,28 +15,33 @@ function injectRecorderScript() {
   (document.head || document.documentElement).appendChild(script);
 }
 
-// 2. Listen for captured XHR events from inject.js
-window.addEventListener("message", async (event) => {
-  if (event.source !== window || !event.data || event.data.source !== "SAP_COPILOT_RECORDER") {
-    return;
-  }
+let localLogBackoffUntil = 0;
 
-  const data = event.data;
-  
-  // Forward to local server
+async function postToLocalRecorder(payload) {
+  if (Date.now() < localLogBackoffUntil) return;
   try {
     await fetch("http://localhost:8787/api/log-traffic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data)
+      body: JSON.stringify(payload)
     });
   } catch (err) {
-    // Local server might be stopped, ignore silently
+    // Local server is stopped; pause logging attempts for 30s to avoid spamming SAP tab
+    localLogBackoffUntil = Date.now() + 30000;
   }
+}
+
+// 2. Listen for captured XHR events from inject.js
+window.addEventListener("message", (event) => {
+  if (event.source !== window || !event.data || event.data.source !== "SAP_COPILOT_RECORDER") {
+    return;
+  }
+  postToLocalRecorder(event.data);
 });
 
-// 3. Scan DOM for visible notes or tabs periodically when user interacts
+// 3. Scan DOM for visible notes or tabs periodically when user interacts (only if local server isn't in backoff)
 function scanVisibleNotes() {
+  if (Date.now() < localLogBackoffUntil) return;
   try {
     // Look for Notes tab text area or table
     const noteElements = document.querySelectorAll("textarea, [ct='TEXTEDIT'], td[subct='STC']");
@@ -49,17 +54,13 @@ function scanVisibleNotes() {
     });
 
     if (extractedNotes.length > 0) {
-      fetch("http://localhost:8787/api/log-traffic", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: "SAP_COPILOT_RECORDER",
-          type: "DOM_NOTES_SCAN",
-          action: "DOM Notes Detected",
-          notes: extractedNotes,
-          timestamp: new Date().toISOString()
-        })
-      }).catch(() => {});
+      postToLocalRecorder({
+        source: "SAP_COPILOT_RECORDER",
+        type: "DOM_NOTES_SCAN",
+        action: "DOM Notes Detected",
+        notes: extractedNotes,
+        timestamp: new Date().toISOString()
+      });
     }
   } catch (e) {}
 }
