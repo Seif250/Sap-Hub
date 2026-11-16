@@ -24,7 +24,8 @@ try {
 } catch {
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 }
-[System.Net.ServicePointManager]::DefaultConnectionLimit = 100
+[System.Net.ServicePointManager]::DefaultConnectionLimit = 256
+[System.Net.ServicePointManager]::MaxServicePointIdleTime = 120000
 [System.Net.ServicePointManager]::Expect100Continue = $false
 [System.Net.ServicePointManager]::UseNagleAlgorithm = $false
 
@@ -162,13 +163,15 @@ while ($listener.IsListening) {
         }
 
         if ($path -eq "/api/get-cookies") {
-            $cookieFile = Join-Path $scriptDir "active_cookie.txt"
             $cookieContent = ""
-            if (Test-Path $cookieFile) {
-                $cookieContent = [System.IO.File]::ReadAllText($cookieFile, [System.Text.Encoding]::UTF8)
-            }
-            if (-not $cookieContent -and $script:lastSyncedCookie) {
+            if ($script:lastSyncedCookie) {
                 $cookieContent = $script:lastSyncedCookie
+            } else {
+                $cookieFile = Join-Path $scriptDir "active_cookie.txt"
+                if (Test-Path $cookieFile) {
+                    $cookieContent = [System.IO.File]::ReadAllText($cookieFile, [System.Text.Encoding]::UTF8)
+                    $script:lastSyncedCookie = $cookieContent
+                }
             }
 
             $hasSession = if ($cookieContent) { $cookieContent.Contains("SAP_SESSIONID") } else { $false }
@@ -306,11 +309,16 @@ while ($listener.IsListening) {
             $postBody = [string]$payload.body
             $referer = if ($payload.referer) { [string]$payload.referer } else { "https://prd-sap.sms.britishcouncil.org/sap/bc/webdynpro/sap/z_her_wa_student?WDCONFIGURATIONID=Z_HER_AC_STUDENT" }
 
-            # Auto-fallback to synced cookie if client didn't supply one
+            # Auto-fallback to in-memory synced cookie first (0ms), then disk file
             if (-not $cookie) {
-                $cookieFile = Join-Path $scriptDir "active_cookie.txt"
-                if (Test-Path $cookieFile) {
-                    $cookie = [System.IO.File]::ReadAllText($cookieFile, [System.Text.Encoding]::UTF8)
+                if ($script:lastSyncedCookie) {
+                    $cookie = $script:lastSyncedCookie
+                } else {
+                    $cookieFile = Join-Path $scriptDir "active_cookie.txt"
+                    if (Test-Path $cookieFile) {
+                        $cookie = [System.IO.File]::ReadAllText($cookieFile, [System.Text.Encoding]::UTF8)
+                        $script:lastSyncedCookie = $cookie
+                    }
                 }
             }
 
