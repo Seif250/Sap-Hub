@@ -688,23 +688,44 @@
     return result;
   }
 
-  function to12HourStr(hhStr, mmStr) {
+  function to12HourStr(hhStr, mmStr, ssStr = "") {
     const h = parseInt(hhStr, 10);
-    if (isNaN(h) || h < 0 || h > 23) return `${hhStr}:${mmStr}`;
+    if (isNaN(h) || h < 0 || h > 23) return ssStr ? `${hhStr}:${mmStr}:${ssStr}` : `${hhStr}:${mmStr}`;
     const ampm = h >= 12 ? "PM" : "AM";
     const h12 = h % 12 || 12;
-    return `${h12}:${mmStr} ${ampm}`;
+    return ssStr ? `${h12}:${mmStr}:${ssStr} ${ampm}` : `${h12}:${mmStr} ${ampm}`;
+  }
+
+  function to24HourStr(hhStr, mmStr, meridiem, ssStr = "") {
+    let h = parseInt(hhStr, 10);
+    if (isNaN(h)) return `${hhStr}:${mmStr}${ssStr ? ":" + ssStr : ""}`;
+    if (/pm/i.test(meridiem) && h < 12) h += 12;
+    if (/am/i.test(meridiem) && h === 12) h = 0;
+    const base = `${String(h).padStart(2, "0")}:${mmStr}`;
+    return ssStr ? `${base}:${ssStr}` : base;
+  }
+
+  function formatClassTime24h(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/([A-Za-z])(\d{1,2}:\d{2})/g, "$1 $2")
+      .replace(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)\b/gi, (_, h, m, s, mer) => {
+        return to24HourStr(h, m, mer, s || "");
+      })
+      .replace(/\b(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\b/g, (_, h1, m1, h2, m2) => {
+        return `${h1.padStart(2, "0")}:${m1} - ${h2.padStart(2, "0")}:${m2}`;
+      });
   }
 
   function formatClassTime12h(str) {
     if (!str) return "";
-    return String(str)
-      .replace(/([A-Za-z])(\d{1,2}:\d{2})/g, "$1 $2")
+    const as24 = formatClassTime24h(str);
+    return as24
       .replace(/\b(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\b/g, (_, h1, m1, h2, m2) => {
         return `${to12HourStr(h1, m1)} - ${to12HourStr(h2, m2)}`;
       })
-      .replace(/\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:AM|PM|am|pm))/g, (_, h1, m1) => {
-        return to12HourStr(h1, m1);
+      .replace(/\b([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?\b(?!\s*(?:AM|PM|am|pm))/g, (_, h1, m1, s1) => {
+        return to12HourStr(h1, m1, s1 || "");
       });
   }
 
@@ -712,18 +733,18 @@
     const raw = String(className || "");
     const sess = String(sessionText || "");
     const combined = `${raw} ${sess}`;
-    const displayClassName = formatClassTime12h(raw);
-    const displayClassName24h = raw.replace(/([A-Za-z])(\d{1,2}:\d{2})/g, "$1 $2");
+    const displayClassName24h = formatClassTime24h(raw);
+    const displayClassName = formatClassTime12h(displayClassName24h);
     let timeRange12h = "";
     let timeRange24h = "";
     let startMinutes = 9999;
-    const rangeMatch = raw.match(/(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})/);
+    const rangeMatch = displayClassName24h.match(/(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})/);
     if (rangeMatch) {
       timeRange12h = `${to12HourStr(rangeMatch[1], rangeMatch[2])} - ${to12HourStr(rangeMatch[3], rangeMatch[4])}`;
       timeRange24h = `${rangeMatch[1].padStart(2, "0")}:${rangeMatch[2]} - ${rangeMatch[3].padStart(2, "0")}:${rangeMatch[4]}`;
       startMinutes = parseInt(rangeMatch[1], 10) * 60 + parseInt(rangeMatch[2], 10);
     }
-    const daysMatch = raw.match(/\b((?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)(?:\/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat))*)/i);
+    const daysMatch = displayClassName24h.match(/\b((?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)(?:\/(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat))*)(?=\b|\d|\/|\s|$)/i);
     const daysText = daysMatch ? daysMatch[1] : "";
     const termMatch = combined.match(/\b(?:Term\s*|T)(\d{1,2})\b/i);
     const termText = termMatch ? `T${termMatch[1]}` : "";
@@ -1109,6 +1130,345 @@
     };
   }
 
+  function stripSapPlaceholderText(val) {
+    if (!val) return "";
+    let s = cleanSapCellText(val);
+    if (!s) return "";
+    // Remove SAP Web Dynpro trailing screen-reader field descriptions & "Empty" markers
+    s = s
+      .replace(/\s*\bEmpty$/i, "")
+      .trim()
+      .replace(/(?:Object abbr\.|Academic Session \(Desc\.\)|Academic Year|Start Date|End Date|CancDate|User Name|Amount)\s*$/i, "")
+      .trim();
+    if (!s || /^0000$/i.test(s) || /^00:00:00$/i.test(s) || /^empty$/i.test(s)) return "";
+    return s;
+  }
+
+  function extractSapNodeValue(el) {
+    if (!el) return "";
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      if (el.type === "checkbox") return el.checked ? "Yes" : "No";
+      return stripSapPlaceholderText(el.value || el.getAttribute("value") || "");
+    }
+    const role = (el.getAttribute && el.getAttribute("role")) || "";
+    const ct = (el.getAttribute && el.getAttribute("ct")) || "";
+    if (role === "checkbox" || ct === "C" || ct === "CBX") {
+      const aria = el.getAttribute("aria-checked");
+      if (aria === "true") return "Yes";
+      if (aria === "false") return "No";
+    }
+    const innerInp = el.querySelector && el.querySelector("input, textarea");
+    if (innerInp) {
+      if (innerInp.type === "checkbox") return innerInp.checked ? "Yes" : "No";
+      // Even when value is empty, NEVER fall through to hidden accessibility label text inside the wrapper!
+      return stripSapPlaceholderText(innerInp.value || innerInp.getAttribute("value") || "");
+    }
+    // Clone and strip SAP hidden accessibility / screen-reader helper spans before reading textContent
+    const clone = el.cloneNode ? el.cloneNode(true) : el;
+    if (clone.querySelectorAll) {
+      clone
+        .querySelectorAll('.lsHd, .urTxtHlp, .urHlp, .lsField--aria, [aria-hidden="true"], [style*="display:none"], [style*="display: none"], [style*="visibility:hidden"], [id$="-lbl"], [id$="-aria"], [class*="ScreenReader"]')
+        .forEach((n) => n.remove());
+    }
+    return stripSapPlaceholderText(clone.textContent || "");
+  }
+
+  function ensureDomRoot(vdomOrHtml) {
+    if (vdomOrHtml && typeof vdomOrHtml === "object" && typeof vdomOrHtml.querySelectorAll === "function") {
+      return vdomOrHtml;
+    }
+    const unescaped = String(vdomOrHtml || "")
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    const dec = decodeHtmlEntities(unescaped);
+    const div = document.createElement("div");
+    if (global.SAPClient && global.SAPClient.applySapDeltaUpdates) {
+      global.SAPClient.applySapDeltaUpdates(dec, div);
+    } else {
+      div.innerHTML = dec;
+    }
+    return div;
+  }
+
+  function parseExistingRegistrationsList(vdomOrHtml) {
+    const root = ensureDomRoot(vdomOrHtml);
+    const rows = [];
+    let tableId = null;
+
+    const allTables = Array.from(root.querySelectorAll("table"));
+    // Locate the Registrations LIST_VIEW table (has headers or LIST_VIEW hints; exclude V_LIST search popup)
+    const regTables = [];
+    const seenRegTables = new Set();
+    const addRegTable = (tbl) => {
+      if (!tbl || seenRegTables.has(tbl)) return;
+      const id = tbl.getAttribute("id") || "";
+      const hint = tbl.getAttribute("data-hint") || "";
+      if (/V_LIST/i.test(id) || /V_LIST/i.test(hint)) return;
+      seenRegTables.add(tbl);
+      regTables.push(tbl);
+    };
+    allTables.forEach((tbl) => {
+      const id = tbl.getAttribute("id") || "";
+      const hint = tbl.getAttribute("data-hint") || "";
+      if (/V_LIST/i.test(id) || /V_LIST/i.test(hint)) return;
+      const htmlStr = tbl.innerHTML || "";
+      const txt = tbl.textContent || "";
+      if (/LIST_VIEW\./i.test(htmlStr) || /Booking\s+Status/i.test(txt) || /Course\/Consultation/i.test(txt)) {
+        addRegTable(tbl);
+        if (id.endsWith("-mrss-hdr-none-content")) {
+          const contId = id.replace(/-mrss-hdr-none-content$/, "-mrss-cont-none-content");
+          addRegTable(root.querySelector(`[id="${CSS.escape(contId)}"]`));
+        }
+      }
+    });
+
+    // Prefer table rows (<tr rr="k"> or <tr id="...-mrss-cont-none-Row-k">) inside LIST_VIEW tables
+    const trCandidates = [];
+    const seenTr = new Set();
+    regTables.forEach((tbl) => {
+      const tidMatch = (tbl.getAttribute("id") || "").match(/^(WD[0-9A-F]+)/i);
+      const tblHintMatch = tidMatch ? tidMatch[1] : null;
+      // Inspect header titles from matching -mrss-hdr table if present
+      const colHeaders = Array.from(tbl.querySelectorAll('th, [role="columnheader"]')).map((th) =>
+        cleanSapCellText(th.textContent || "").toLowerCase()
+      );
+      Array.from(tbl.querySelectorAll('tr[rr], tr[id*="-mrss-cont-none-Row-"]')).forEach((tr) => {
+        if (seenTr.has(tr)) return;
+        const outerHtml = tr.outerHTML || "";
+        if (/V_LIST/i.test(outerHtml)) return;
+        seenTr.add(tr);
+        trCandidates.push({ tr, tblHintId: tblHintMatch, colHeaders });
+      });
+    });
+
+    trCandidates.forEach(({ tr, tblHintId, colHeaders }) => {
+      const rrAttr = tr.getAttribute("rr");
+      const idRowM = (tr.getAttribute("id") || "").match(/-mrss-cont-none-Row-(\d+)$/i);
+      const rr = rrAttr !== null ? parseInt(rrAttr, 10) : (idRowM ? parseInt(idRowM[1], 10) + 1 : 0);
+      if (isNaN(rr) || rr < 1) return;
+
+      const rowTblMatch = (tr.getAttribute("id") || "").match(/^(WD[0-9A-F]+)/i);
+      const rowTableId = (rowTblMatch && rowTblMatch[1]) || tblHintId || "WDDF";
+      if (!tableId && rowTableId) tableId = rowTableId;
+
+      const tdEls = Array.from(tr.children).filter((el) => el.tagName === "TD");
+      if (tdEls.length < 4) return;
+
+      // Map data-hints if present (Row 1 has explicit hints; Row 2+ uses header column positions)
+      const hintVal = (pattern) => {
+        const matchEl = tr.querySelector(`[data-hint*="${pattern}"]`);
+        return matchEl ? extractSapNodeValue(matchEl) : "";
+      };
+
+      const cellTexts = tdEls.map((td) => extractSapNodeValue(td));
+      const colByHeader = (rx) => {
+        if (!colHeaders || colHeaders.length === 0) return "";
+        const idx = colHeaders.findIndex((h) => rx.test(h));
+        return idx >= 0 && idx < cellTexts.length ? cellTexts[idx] : "";
+      };
+      const nonSelector = cellTexts.filter((t, i) => {
+        const subct = tdEls[i].getAttribute("subct") || "";
+        return subct !== "SC" && !/^yes$|^no$/i.test(t) && t !== "";
+      });
+
+      const dateCells = cellTexts.filter((t) => /^\d{2}\.\d{2}\.\d{4}$/.test(t));
+      const startDate = hintVal("BEGDA") || colByHeader(/start\s*date/i) || dateCells[0] || "";
+      const endDate = hintVal("ENDDA") || colByHeader(/end\s*date/i) || dateCells[1] || dateCells[dateCells.length - 1] || "";
+
+      const courseAndSession = hintVal("SM_") || colByHeader(/course\/consultation|session/i) || nonSelector[0] || "";
+      const className = hintVal("E_STEXT") || colByHeader(/^class$/i) || nonSelector[1] || "";
+      const bookingSource = hintVal("ORIGIN") || colByHeader(/booking\s*source/i) || nonSelector[2] || "";
+      const status = hintVal("STATUS") || colByHeader(/booking\s*status/i) || nonSelector.find((t) => /book|reserv|cancel|wait|complet/i.test(t)) || nonSelector[3] || "";
+      const bookingType = hintVal("BOOKING_TYPE") || colByHeader(/booking\s*type/i) || nonSelector.find((t) => /reserv|wait|definit/i.test(t) && t !== status) || nonSelector[4] || "";
+
+      const scCell = tr.querySelector('td[subct="SC"], td[subct="STC"], td[id^="WD"]');
+      const triggerCellId = scCell ? scCell.getAttribute("id") || "" : "";
+      const rowCls = (tr.getAttribute("class") || "") + " " + (scCell ? scCell.getAttribute("class") || "" : "");
+      const ariaSel = tr.getAttribute("aria-selected") === "true" || (scCell && scCell.getAttribute("aria-selected") === "true");
+      const radioChecked = Boolean(tr.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"], .lsTblRowSel, .urSTSel'));
+      const selected = Boolean(ariaSel || radioChecked || /Sel/i.test(rowCls));
+
+      if (courseAndSession || className || status) {
+        rows.push({
+          rowIndex: rr,
+          tableId: rowTableId,
+          triggerCellId,
+          selected,
+          courseAndSession,
+          className,
+          bookingSource,
+          status,
+          bookingType,
+          startDate,
+          endDate,
+        });
+      }
+    });
+
+    return { tableId, rows };
+  }
+
+  function parseRegistrationDetailsPanel(vdomOrHtml) {
+    const root = ensureDomRoot(vdomOrHtml);
+    const labelMap = {};
+    const changeSequences = { Changed: [], Created: [] };
+
+    const labels = Array.from(root.querySelectorAll('label, [ct="L"]'));
+    labels.forEach((lbl) => {
+      const rawText = cleanSapCellText(lbl.textContent || "").replace(/:\s*$/, "").trim();
+      if (!rawText) return;
+      const keyLower = rawText.toLowerCase();
+
+      // 1. Resolve primary value via `for` attribute
+      let val = "";
+      const forId = lbl.getAttribute("for");
+      if (forId) {
+        const target = root.querySelector(`[id="${CSS.escape(forId)}"]`);
+        if (target) val = extractSapNodeValue(target);
+      }
+
+      // 2. Fallback or multi-column extraction in same row (e.g. Changed: SELDIN 07.11.2026 13:11:32)
+      const parentTd = lbl.closest("td");
+      const parentTr = lbl.closest("tr");
+      if (parentTd && parentTr) {
+        const trTds = Array.from(parentTr.children).filter((el) => el.tagName === "TD");
+        const myIdx = trTds.indexOf(parentTd);
+        if (myIdx >= 0) {
+          const collected = [];
+          for (let j = myIdx + 1; j < trTds.length; j++) {
+            const sib = trTds[j];
+            if (sib.querySelector('label, [ct="L"]')) break;
+            const txt = extractSapNodeValue(sib);
+            if (txt) collected.push(txt);
+          }
+          if (!val && collected.length > 0) val = collected[0];
+          if (keyLower === "changed" || keyLower === "created") {
+            const combined = [];
+            if (val) combined.push(val);
+            collected.forEach((c) => {
+              if (!combined.includes(c)) combined.push(c);
+            });
+            if (keyLower === "changed" && combined.length > changeSequences.Changed.length) {
+              changeSequences.Changed = combined;
+            }
+            if (keyLower === "created" && combined.length > changeSequences.Created.length) {
+              changeSequences.Created = combined;
+            }
+          }
+        }
+      }
+
+      if (val && (labelMap[keyLower] === undefined || labelMap[keyLower] === "")) {
+        labelMap[keyLower] = val;
+      }
+    });
+
+    // Extract Course fee and Services table rows (supports both nested and sibling -mrss-hdr/-mrss-cont tables)
+    const services = [];
+    const seenServices = new Set();
+    const serviceTables = [];
+    const seenSvcTbl = new Set();
+    const addSvcTbl = (t) => {
+      if (t && !seenSvcTbl.has(t)) {
+        seenSvcTbl.add(t);
+        serviceTables.push(t);
+      }
+    };
+    Array.from(root.querySelectorAll("table")).forEach((tbl) => {
+      const txt = tbl.textContent || "";
+      const htmlStr = tbl.innerHTML || "";
+      if (!/Service\s+description/i.test(txt) && !/Discounted\s+fee/i.test(txt) && !/DISCOUNT_FEE|PAYABLE_AMT/i.test(htmlStr)) return;
+      addSvcTbl(tbl);
+      const id = tbl.getAttribute("id") || "";
+      if (id.endsWith("-mrss-hdr-none-content")) {
+        const contId = id.replace(/-mrss-hdr-none-content$/, "-mrss-cont-none-content");
+        addSvcTbl(root.querySelector(`[id="${CSS.escape(contId)}"]`));
+      }
+    });
+    serviceTables.forEach((tbl) => {
+      Array.from(tbl.querySelectorAll('tr[rr], tr[id*="-mrss-cont-none-Row-"]')).forEach((tr) => {
+        const cells = Array.from(tr.children)
+          .filter((el) => el.tagName === "TD")
+          .map((td) => extractSapNodeValue(td));
+        // Expected columns: [selector], Service description, Fee, Discount, Discounted fee, Payable amount, Currency, Sponsored (%), Cancelled
+        const feeIdx = cells.findIndex((c) => /^\d[\d.,]*$/.test(c));
+        if (feeIdx < 0) return;
+        const serviceDescription = feeIdx > 0 ? (cells[feeIdx - 1] && !/^(Yes|No)$/i.test(cells[feeIdx - 1]) ? cells[feeIdx - 1] : "") : "";
+        const fee = cells[feeIdx] || "";
+        const discount = cells[feeIdx + 1] || "";
+        const discountedFee = cells[feeIdx + 2] || "";
+        const payableAmount = cells[feeIdx + 3] || "";
+        const currency = cells[feeIdx + 4] || "";
+        const sponsoredPct = cells[feeIdx + 5] || "";
+        const cancelled = cells[feeIdx + 6] || "";
+        const k = `${serviceDescription}|${fee}|${payableAmount}|${currency}|${cancelled}`;
+        if (!seenServices.has(k)) {
+          seenServices.add(k);
+          services.push({
+            serviceDescription,
+            fee,
+            discount,
+            discountedFee,
+            payableAmount,
+            currency,
+            sponsoredPct,
+            cancelled,
+          });
+        }
+      });
+    });
+
+    const pick = (...keys) => {
+      for (const k of keys) {
+        if (labelMap[k] !== undefined && labelMap[k] !== "") return labelMap[k];
+      }
+      return "";
+    };
+
+    const parseChangeSeq = (arr, fallbackUser) => {
+      const joined = arr.length ? arr : fallbackUser ? [fallbackUser] : [];
+      let user = "";
+      let date = "";
+      let time = "";
+      joined.forEach((item) => {
+        if (/^\d{2}\.\d{2}\.\d{4}$/.test(item)) date = item;
+        else if (/^\d{2}:\d{2}(?::\d{2})?$/.test(item)) time = item;
+        else if (!user) user = item;
+      });
+      return { user, date, time, raw: joined.join(" ") };
+    };
+
+    return {
+      itemTotal: {
+        payableAmount: pick("payable amount"),
+        discountAmount: pick("discount amount"),
+        totalAmount: pick("total amount"),
+      },
+      paymentOptions: {
+        instalmentType: pick("instalment type", "installment type"),
+        bankInstalment: pick("bank instalment", "bank installment"),
+      },
+      courseDetails: {
+        course: pick("course"),
+        year: pick("year"),
+        period: pick("period"),
+        origin: pick("origin"),
+        status: pick("status"),
+        className: pick("class"),
+        begin: pick("begin", "start date"),
+        end: pick("end", "end date"),
+        cancDate: pick("canc.date", "canc. date", "cancellation date"),
+        reason: pick("reason"),
+      },
+      changeData: {
+        changed: parseChangeSeq(changeSequences.Changed, pick("changed")),
+        created: parseChangeSeq(changeSequences.Created, pick("created")),
+      },
+      services,
+      rawLabels: labelMap,
+    };
+  }
+
   Object.assign(global.SAPClient, {
     TEACHING_CENTRES,
     ACADEMIC_LEVEL_KEYS,
@@ -1116,11 +1476,14 @@
     stepHexId,
     addOneYearToSapDate,
     formatClassTime12h,
+    formatClassTime24h,
     parseClassScheduleInfo,
     resolveSapCourseForLevel,
     parseRegistrationControls,
     parseRegistrationClasses,
     parseSapMessages,
+    parseExistingRegistrationsList,
+    parseRegistrationDetailsPanel,
     findRecentCancelledBookings,
     cancelledBookingToClassItem,
     isPrebookedBooking,

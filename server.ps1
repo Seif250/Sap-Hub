@@ -30,19 +30,113 @@ try {
 [System.Net.ServicePointManager]::UseNagleAlgorithm = $false
 
 $listener = New-Object System.Net.HttpListener
-$prefix = "http://localhost:$Port/"
-$listener.Prefixes.Add($prefix)
-
+$lanEnabled = $false
+$tcpForwarder = $null
 try {
+    $listener.Prefixes.Add("http://+:$Port/")
     $listener.Start()
+    $lanEnabled = $true
 } catch {
-    Write-Host "Failed to start listener on $prefix : $_" -ForegroundColor Red
-    exit 1
+    try { $listener.Close() } catch {}
+    $internalPort = $Port + 100
+    $listener = New-Object System.Net.HttpListener
+    $prefix = "http://127.0.0.1:$internalPort/"
+    $listener.Prefixes.Add($prefix)
+    try {
+        $listener.Start()
+        # Zero-Admin LAN bridge: TcpListener on 0.0.0.0:$Port forwards to 127.0.0.1:$internalPort
+        $tcpForwarder = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
+        $tcpForwarder.Start()
+        $lanEnabled = $true
+
+        $pool = [runspacefactory]::CreateRunspacePool(1, 32)
+        $pool.Open()
+        $acceptPs = [powershell]::Create()
+        $acceptPs.RunspacePool = $pool
+        [void]$acceptPs.AddScript({
+            param($tcpListener, $targetPort, $poolRef)
+            while ($true) {
+                try {
+                    $client = $tcpListener.AcceptTcpClient()
+                    $worker = [powershell]::Create()
+                    $worker.RunspacePool = $poolRef
+                    [void]$worker.AddScript({
+                        param($c, $tPort)
+                        $up = $null
+                        try {
+                            $c.NoDelay = $true
+                            $cs = $c.GetStream()
+                            $up = New-Object System.Net.Sockets.TcpClient("127.0.0.1", $tPort)
+                            $up.NoDelay = $true
+                            $us = $up.GetStream()
+
+                            # Read initial HTTP request headers and rewrite Host header for HttpListener
+                            $buf = New-Object byte[] 16384
+                            $acc = New-Object System.Collections.Generic.List[byte]
+                            $headerEnd = -1
+                            while ($headerEnd -lt 0 -and $acc.Count -lt 65536) {
+                                $n = $cs.Read($buf, 0, $buf.Length)
+                                if ($n -le 0) { break }
+                                for ($i = 0; $i -lt $n; $i++) { $acc.Add($buf[$i]) }
+                                $txt = [System.Text.Encoding]::ASCII.GetString($acc.ToArray())
+                                $idx = $txt.IndexOf("`r`n`r`n")
+                                if ($idx -ge 0) { $headerEnd = $idx + 4 }
+                            }
+                            if ($acc.Count -gt 0) {
+                                $rawArr = $acc.ToArray()
+                                if ($headerEnd -gt 0) {
+                                    $hdrStr = [System.Text.Encoding]::ASCII.GetString($rawArr, 0, $headerEnd)
+                                    $hdrStr = [regex]::Replace($hdrStr, "(?im)^Host:\s*[^\r\n]+", "Host: 127.0.0.1:$tPort")
+                                    $hdrBytes = [System.Text.Encoding]::ASCII.GetBytes($hdrStr)
+                                    $us.Write($hdrBytes, 0, $hdrBytes.Length)
+                                    if ($rawArr.Length -gt $headerEnd) {
+                                        $us.Write($rawArr, $headerEnd, $rawArr.Length - $headerEnd)
+                                    }
+                                } else {
+                                    $us.Write($rawArr, 0, $rawArr.Length)
+                                }
+                                $us.Flush()
+                            }
+
+                            $t1 = $cs.CopyToAsync($us)
+                            $t2 = $us.CopyToAsync($cs)
+                            [void][System.Threading.Tasks.Task]::WhenAny($t1, $t2).GetAwaiter().GetResult()
+                        } catch {
+                        } finally {
+                            try { if ($up) { $up.Close() } } catch {}
+                            try { if ($c) { $c.Close() } } catch {}
+                        }
+                    }).AddArgument($client).AddArgument($targetPort)
+                    [void]$worker.BeginInvoke()
+                } catch {
+                    break
+                }
+            }
+        }).AddArgument($tcpForwarder).AddArgument($internalPort).AddArgument($pool)
+        [void]$acceptPs.BeginInvoke()
+    } catch {
+        Write-Host "Failed to start listener on port $Port : $_" -ForegroundColor Red
+        exit 1
+    }
 }
+
+$lanIps = @()
+try {
+    $lanIps = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceAlias -notmatch 'Loopback' -and $_.IPAddress -notlike '169.254.*' } |
+        Select-Object -ExpandProperty IPAddress)
+} catch {}
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  SAP Student Hub Local Server Running!" -ForegroundColor Green
-Write-Host "  URL: http://localhost:$Port" -ForegroundColor Yellow
+Write-Host "  Local URL: http://localhost:$Port" -ForegroundColor Yellow
+if ($lanEnabled -and $lanIps.Count -gt 0) {
+    foreach ($ip in $lanIps) {
+        Write-Host "  LAN URL (Other Laptop): http://${ip}:$Port" -ForegroundColor Green
+    }
+} elseif (-not $lanEnabled) {
+    Write-Host "  LAN mode off (Run enable-lan-access.bat as Admin once to enable)" -ForegroundColor DarkYellow
+}
 Write-Host "  Keep this window open while using the tool." -ForegroundColor Gray
 Write-Host "=========================================================" -ForegroundColor Cyan
 

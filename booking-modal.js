@@ -5,7 +5,7 @@
 (function (global) {
   const React = global.React;
   const { useState, useEffect } = React;
-  const { html, Icon } = global.UIKit;
+  const { html, Icon, fmtDate } = global.UIKit;
   const SAPC = global.SAPClient;
   const Svc = global.SapService;
 
@@ -850,7 +850,7 @@
                         >
                           ${tBadge && html`<span className="font-mono font-bold text-amber-700 bg-amber-100 px-1 rounded text-[10px]">${tBadge}</span>`}
                           <span className="font-semibold truncate max-w-[210px]">${fmtClass(cc)}</span>
-                          <span className="text-[10px] text-slate-500 num">(${cc.startDate || ""})</span>
+                          <span className="text-[10px] text-slate-500 num">(${cc.startDate ? fmtDate(cc.startDate) : ""})</span>
                           <button
                             type="button"
                             onClick=${() => removeFromCart(cc)}
@@ -927,7 +927,7 @@
                         <div key=${bi} className="flex items-center gap-1.5 text-[11.5px]">
                           ${getTermText(bc) && html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${getTermText(bc)}</span>`}
                           <b>${fmtClass(bc)}</b>
-                          <span className="muted num">(${bc.startDate} → ${bc.endDate})</span>
+                          <span className="muted num">(${fmtDate(bc.startDate)} → ${fmtDate(bc.endDate)})</span>
                         </div>
                       `)}
                     </div>
@@ -986,8 +986,8 @@
                           <td className="whitespace-nowrap">
                             ${termBadge ? html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${termBadge}</span>` : html`<span className="muted text-[11px]">—</span>`}
                           </td>
-                          <td className="num whitespace-nowrap font-medium text-[11.5px]">${cls.startDate || "—"}</td>
-                          <td className="num whitespace-nowrap text-[11.5px]">${cls.endDate || "—"}</td>
+                          <td className="num whitespace-nowrap font-medium text-[11.5px]">${cls.startDate ? fmtDate(cls.startDate) : "—"}</td>
+                          <td className="num whitespace-nowrap text-[11.5px]">${cls.endDate ? fmtDate(cls.endDate) : "—"}</td>
                           <td className="whitespace-nowrap">${cls.academicLevel ? html`<span className="pill pill-gray font-mono !text-[10px] !py-0 !px-1.5">${cls.academicLevel}</span>` : "—"}</td>
                           <td className="text-[11px]"><div>${cls.session || "—"}</div>${cls.eventType && html`<div className="muted text-[10px]">${cls.eventType}</div>`}</td>
                           <td className="whitespace-nowrap">${seatPill(cls)}</td>
@@ -1056,7 +1056,7 @@
               <div><span className="muted">Student:</span> <b>${SAPC.formatStudentName(profile.fullName)}</b> (${studentId})</div>
               ${confirmClasses.length === 1 ? html`
                 <div><span className="muted">Class:</span> <b className="text-slate-900 select-text font-bold" title=${confirmClasses[0].className}>${fmtClass(confirmClasses[0])}</b></div>
-                <div><span className="muted">Dates:</span> <span className="font-medium text-slate-800">${confirmClasses[0].startDate} → ${confirmClasses[0].endDate}</span></div>
+                <div><span className="muted">Dates:</span> <span className="font-medium text-slate-800">${fmtDate(confirmClasses[0].startDate)} → ${fmtDate(confirmClasses[0].endDate)}</span></div>
                 <div><span className="muted">Branch:</span> <span className="font-medium text-slate-800">${confirmClasses[0]._centreName || "—"}</span></div>
               ` : html`
                 <div className="pt-1">
@@ -1069,7 +1069,7 @@
                           ${getTermText(cc) && html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${getTermText(cc)}</span>`}
                           <b className="truncate text-slate-900 select-text" title=${cc.className}>${fmtClass(cc)}</b>
                         </div>
-                        <span className="text-[11px] text-slate-600 num whitespace-nowrap">${cc.startDate} → ${cc.endDate}</span>
+                        <span className="text-[11px] text-slate-600 num whitespace-nowrap">${fmtDate(cc.startDate)} → ${fmtDate(cc.endDate)}</span>
                       </div>
                     `)}
                   </div>
@@ -1183,7 +1183,7 @@
                       <span className="pill pill-green !text-[10px] font-bold shrink-0">Done ✓</span>
                     </div>
                     <div className="flex items-center gap-2.5 text-slate-600 text-[11px] pl-6.5">
-                      <span className="num font-medium">${bc.startDate} → ${bc.endDate}</span>
+                      <span className="num font-medium">${fmtDate(bc.startDate)} → ${fmtDate(bc.endDate)}</span>
                       <span>•</span>
                       <span>${bc._centreName || bookingResult.centreName || "Teaching Centre"}</span>
                     </div>

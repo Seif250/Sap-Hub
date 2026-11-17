@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // SAP Web Dynpro Connector, Delta DOM Engine & Screen Parsers
 // Exact battle-tested SAPEVENTQUEUE protocol for Z_HER_WA_STUDENT
 // ============================================================================
@@ -680,16 +680,19 @@
       detectedLevelFromNotes = "Beginner E";
     }
 
-    let historyPopupId = DEFAULT_CONTROLS.historyPopupId;
-    let bookingHistoryItemId = DEFAULT_CONTROLS.bookingHistoryItemId;
-    let historyMenuBtn = DEFAULT_CONTROLS.historyMenuBtn;
+    let historyPopupId = null;
+    let bookingHistoryItemId = null;
+    let historyMenuBtn = null;
 
     const histBtnMatch =
       decodedXml.match(
-        /id="(WD[0-9A-F]+)"[^>]*ct="B"[^>]*lsdata='[^']*"0"\s*:\s*"History"[^']*"15"\s*:\s*"(WD[0-9A-F]+)"/i
+        /id="(WD[0-9A-F]+)"[^>]*ct="B"[^>]*lsdata='[^']*["']0["']\s*:\s*["']History["'][^']*["']15["']\s*:\s*["'](WD[0-9A-F]+)["']/i
       ) ||
       decodedXml.match(
-        /ct="B"[^>]*id="(WD[0-9A-F]+)"[^>]*lsdata='[^']*"0"\s*:\s*"History"[^']*"15"\s*:\s*"(WD[0-9A-F]+)"/i
+        /ct="B"[^>]*id="(WD[0-9A-F]+)"[^>]*lsdata='[^']*["']0["']\s*:\s*["']History["'][^']*["']15["']\s*:\s*["'](WD[0-9A-F]+)["']/i
+      ) ||
+      decodedXml.match(
+        /id="(WD[0-9A-F]+)"[^>]*ct="B"[^>]*lsdata='[^']*["']15["']\s*:\s*["'](WD[0-9A-F]+)["'][^']*["']0["']\s*:\s*["']History["']/i
       );
     if (histBtnMatch) {
       historyMenuBtn = histBtnMatch[1];
@@ -699,7 +702,8 @@
     const bookingItemMatch =
       decodedXml.match(/<tr[^>]*ct="POMNI"[^>]*lsdata='[^']*Booking\s+history[^']*'[^>]*id="(WD[0-9A-F]+)"/i) ||
       decodedXml.match(/<tr[^>]*id="(WD[0-9A-F]+)"[^>]*ct="POMNI"[^>]*lsdata='[^']*Booking\s+history/i) ||
-      decodedXml.match(/<tr[^>]*id="(WD[0-9A-F]+)"[^>]*aria-label="Booking\s+history"/i);
+      decodedXml.match(/<tr[^>]*id="(WD[0-9A-F]+)"[^>]*aria-label="Booking\s+history"/i) ||
+      decodedXml.match(/<tr[^>]*\bid="(WD[0-9A-F]+)"[^>]*\bct="POMNI"[^>]*>[\s\S]{0,450}?Booking\s+history/i);
 
     if (bookingItemMatch) {
       bookingHistoryItemId = bookingItemMatch[1];
@@ -715,6 +719,43 @@
         }
       }
     }
+
+    // DOM fallback on cumulative vdom (catches cases where rawXml was partial or lsdata order differed)
+    if (vdom && (!bookingHistoryItemId || !historyPopupId || !historyMenuBtn)) {
+      if (!historyMenuBtn || !historyPopupId) {
+        const btns = Array.from(vdom.querySelectorAll('[ct="B"][id^="WD"]'));
+        const histBtn = btns.find((b) => /\bHistory\b/i.test(b.textContent || b.getAttribute("lsdata") || ""));
+        if (histBtn) {
+          if (!historyMenuBtn) historyMenuBtn = histBtn.getAttribute("id");
+          const ls = histBtn.getAttribute("lsdata") || "";
+          const popM = ls.match(/["']15["']\s*:\s*["'](WD[0-9A-F]+)["']/i);
+          if (popM && !historyPopupId) historyPopupId = popM[1];
+        }
+      }
+      if (!bookingHistoryItemId) {
+        const pomniRows = Array.from(vdom.querySelectorAll('tr[ct="POMNI"][id^="WD"]'));
+        const histRow = pomniRows.find((tr) =>
+          /Booking\s+history/i.test(`${tr.textContent || ""} ${tr.getAttribute("lsdata") || ""} ${tr.getAttribute("aria-label") || ""}`)
+        );
+        if (histRow) {
+          bookingHistoryItemId = histRow.getAttribute("id");
+          if (!historyPopupId) {
+            const parentPomn = histRow.closest('table[ct="POMN"][id^="WD"]');
+            if (parentPomn) historyPopupId = parentPomn.getAttribute("id");
+          }
+          if (!historyMenuBtn && bookingHistoryItemId) {
+            const hexNum = parseInt(bookingHistoryItemId.replace(/^WD/, ""), 16);
+            if (!isNaN(hexNum)) {
+              historyMenuBtn = "WD" + (hexNum - 1).toString(16).toUpperCase().padStart(4, "0");
+            }
+          }
+        }
+      }
+    }
+
+    historyPopupId = historyPopupId || DEFAULT_CONTROLS.historyPopupId;
+    bookingHistoryItemId = bookingHistoryItemId || DEFAULT_CONTROLS.bookingHistoryItemId;
+    historyMenuBtn = historyMenuBtn || DEFAULT_CONTROLS.historyMenuBtn;
 
     const backToSearchMatch =
       decodedXml.match(/id="(WD[0-9A-F]+)"[^>]*ct="B"[^>]*lsdata='[^']*"0"\s*:\s*"Back\s+to\s+search"/i) ||
@@ -1025,11 +1066,15 @@
         const chunk = decodedXml.slice(start, end > start ? end : start + 35000);
 
         function getHint(field) {
-          const re = new RegExp('LIST_VIEW\\.' + field + '[^"]*"[^>]*>([\\s\\S]*?)<', 'i');
+          const re = new RegExp('LIST_VIEW\\.' + field + '[^"]*"[^>]*>([\\s\\S]*?)<\\/(?:span|td|div|a)', 'i');
           const m = chunk.match(re);
           if (m && m[1]) {
-            return cleanSapCellText(m[1].replace(/<[^>]+>/g, ""));
+            const cleaned = cleanSapCellText(m[1].replace(/<[^>]+>/g, ""));
+            if (cleaned) return cleaned;
           }
+          const inpRe = new RegExp('<input[^>]*LIST_VIEW\\.' + field + '[^>]*value="([^"]*)"', 'i');
+          const im = chunk.match(inpRe);
+          if (im && im[1]) return cleanSapCellText(im[1]);
           return "";
         }
 
@@ -1039,13 +1084,17 @@
         const className = getHint("E_STEXT_FPM_CE");
         const teacherName = getHint("TEACHER_FPM_CE");
         const teachingCentre = getHint("O_STEXT_FPM_CE");
-        const sessionParts = [getHint("PERYR_FPM_CE"), getHint("PERIT_FPM_CE"), getHint("PERID_BEGDA_FPM_CE"), getHint("PERID_ENDDA_FPM_CE")].filter(Boolean);
+        const periodStart = getHint("PERID_BEGDA_FPM_CE");
+        const periodEnd = getHint("PERID_ENDDA_FPM_CE");
+        const classStart = getHint("EV_BEGDA_FPM_CE") || getHint("E_BEGDA_FPM_CE") || getHint("BEGDA_FPM_CE");
+        const classEnd = getHint("EV_ENDDA_FPM_CE") || getHint("E_ENDDA_FPM_CE") || getHint("ENDDA_FPM_CE");
+        const sessionParts = [getHint("PERYR_FPM_CE"), getHint("PERIT_FPM_CE"), periodStart, periodEnd].filter(Boolean);
         const session = sessionParts.join(" ");
         const bookingSource = getHint("ORIGIN_FPM_CE");
         const bookingType = getHint("BOOKING_TYPE_FPM_CE");
         const status = getHint("SMSTATUST_FPM_CE");
-        const bookingDate = getHint("BOOKDATE_FPM_CE");
-        const bookingTime = getHint("BOOKTIME_FPM_CE");
+        const bookingDate = getHint("BOOKDATE_FPM_CE") || getHint("CREATED_ON_FPM_CE") || getHint("CRDAT_FPM_CE");
+        const bookingTime = getHint("BOOKTIME_FPM_CE") || getHint("CREATED_AT_FPM_CE");
 
         if (courseCode || courseDescription || className) {
           // Key MUST include className and status so prebooked options at the exact same minute are preserved
@@ -1065,6 +1114,8 @@
               status,
               bookingDate,
               bookingTime,
+              actualStartDate: classStart || "",
+              actualEndDate: classEnd || "",
             });
           }
         }

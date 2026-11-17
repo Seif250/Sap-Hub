@@ -4,8 +4,8 @@
 // ============================================================================
 (function (global) {
   const React = global.React;
-  const { useState } = React;
-  const { html, Icon, egp, breakdown } = global.UIKit;
+  const { useState, useEffect } = React;
+  const { html, Icon, egp, fmtDate, bookingDates, bookingStatusTone, breakdown } = global.UIKit;
   const KB = global.BCKnowledgeBase;
   const SAPC = global.SAPClient;
   const Svc = global.SapService;
@@ -61,32 +61,32 @@
         </div>
 
         ${p.isAdult
-          ? html`<div className="space-y-2">
+        ? html`<div className="space-y-2">
               <div className="grid grid-cols-3 gap-1.5">${KB.ADULT_COURSES.map((c) => html`<button key=${c.id} className=${`seg ${p.adultCourseId === c.id ? "active" : ""}`}
                 onClick=${() => { p.setAdultCourseId(c.id); if (!c.packages.some((x) => x.credits === p.credits)) p.setCredits(c.packages[c.packages.length - 1].credits); }}>${c.code}</button>`)}</div>
               <div className="grid grid-cols-4 gap-1.5">${course.packages.map((pk) => html`<button key=${pk.id} className=${`seg ${p.credits === pk.credits ? "active" : ""}`} onClick=${() => p.setCredits(pk.credits)}>
                 <div>${pk.credits} Credits</div><div className="muted text-[10.5px] num">${egp(pk.price)}</div></button>`)}</div>
             </div>`
-          : html`<div className="grid grid-cols-4 gap-1.5">${[1, 2, 3, 4].map((t) => {
-              const r = KB.PRICING.bundleDiscounts[t] || 0;
-              return html`<button key=${t} className=${`seg ${p.terms === t ? "active" : ""}`} onClick=${() => p.setTerms(t)}>
+        : html`<div className="grid grid-cols-4 gap-1.5">${[1, 2, 3, 4].map((t) => {
+          const r = KB.PRICING.bundleDiscounts[t] || 0;
+          return html`<button key=${t} className=${`seg ${p.terms === t ? "active" : ""}`} onClick=${() => p.setTerms(t)}>
                 <div>${t === 4 ? "Full Year" : `${t} Term${t > 1 ? "s" : ""}`}</div>
                 <div className=${`text-[10.5px] ${r ? "text-green-700 font-semibold" : "muted"}`}>${r ? `−${r * 100}%` : "No bundle"}</div></button>`;
-            })}</div>`}
+        })}</div>`}
 
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2.5">
           <${Toggle} label=${`Placement test (+${egp(KB.PRICING.placementTestFee)})`} checked=${p.includePT} onChange=${p.setIncludePT}
             hint=${m ? m.pt.detail : ""} />
           ${p.isAdult
-            ? html`<${Toggle} label="Re-registration 10%" checked=${p.reReg} onChange=${p.setReReg} eligible=${m ? m.reReg.eligible : undefined} hint=${m ? m.reReg.reason : ""} />`
-            : html`<${Toggle} label="Sibling 10%" checked=${p.sibling} onChange=${p.setSibling} eligible=${m ? m.sibling.eligible : undefined} hint=${m ? m.sibling.reason : ""} />`}
+        ? html`<${Toggle} label="Re-registration 10%" checked=${p.reReg} onChange=${p.setReReg} eligible=${m ? m.reReg.eligible : undefined} hint=${m ? m.reReg.reason : ""} />`
+        : html`<${Toggle} label="Sibling 10%" checked=${p.sibling} onChange=${p.setSibling} eligible=${m ? m.sibling.eligible : undefined} hint=${m ? m.sibling.reason : ""} />`}
         </div>
 
         <div className="mt-2.5 rounded-[10px] p-3 grid grid-cols-[1fr_auto] gap-x-4 text-[12.5px]" style=${{ background: "var(--surface)" }}>
           <div className="space-y-1">
             <div className="flex justify-between"><span className="muted">Base price</span><span className="num">${egp(q.baseTuition + (q.varioDeduction || 0))}</span></div>
             ${rows.length ? rows.map((r) => html`<div key=${r.label} className="flex justify-between text-green-700"><span>${r.label}</span><span className="num">−${egp(r.amount)}</span></div>`)
-              : html`<div className="flex justify-between muted"><span>Discounts</span><span>None applied</span></div>`}
+        : html`<div className="flex justify-between muted"><span>Discounts</span><span>None applied</span></div>`}
             ${q.ptFee > 0 && html`<div className="flex justify-between"><span className="muted">Placement test</span><span className="num">+${egp(q.ptFee)}</span></div>`}
             ${q.debtAmount > 0 && html`<div className="flex justify-between text-red-700 font-semibold"><span>Previous balance (debt)</span><span className="num">+${egp(q.debtAmount)}</span></div>`}
             ${q.creditAmount > 0 && html`<div className="flex justify-between text-blue-700 font-semibold"><span>Available credit</span><span className="num">−${egp(q.creditAmount)}</span></div>`}
@@ -104,7 +104,7 @@
       <div className="min-w-0 border-l pl-4 flex flex-col" style=${{ borderColor: "var(--line)" }}>
         <div className="font-semibold flex items-center gap-2 mb-2"><${Icon} name="card" className="muted" />Installments (Credit Card)</div>
         ${q.installmentEligible
-          ? html`<div className="space-y-1.5">
+        ? html`<div className="space-y-1.5">
               ${[["6", rate("installment6MRate"), q.monthly6M, q.total6M], ["12", rate("installment12MRate"), q.monthly12M, q.total12M]].map(([k, r, mo, tot]) => html`
                 <label key=${k} className=${`seg flex items-center gap-2.5 !px-3 !py-2 text-left ${p.plan === k ? "active" : ""}`}>
                   <input type="radio" name="plan" className="accent-[#0b4fd1]" checked=${p.plan === k} onChange=${() => p.setPlan(k)} />
@@ -114,11 +114,11 @@
                 </label>`)}
               <div className="text-[11.5px] muted flex justify-between px-1"><span>Interest on ${p.plan}M</span><span className="num">${egp(planInterest)}</span></div>
               ${BANKS.length
-                ? html`<select className="input !h-8 text-[12px]" value=${p.bank} onChange=${(e) => p.setBank(e.target.value)}>
+            ? html`<select className="input !h-8 text-[12px]" value=${p.bank} onChange=${(e) => p.setBank(e.target.value)}>
                     <option value="">Select bank…</option>${BANKS.map((b) => html`<option key=${b}>${b}</option>`)}</select>`
-                : html`<div className="text-[11px] muted flex items-center gap-1"><${Icon} name="info" size=${12} />Supported bank list is not configured.</div>`}
+            : html`<div className="text-[11px] muted flex items-center gap-1"><${Icon} name="info" size=${12} />Supported bank list is not configured.</div>`}
             </div>`
-          : html`<div className="rounded-[10px] p-3 text-[12px]" style=${{ background: "var(--amber-50)", color: "var(--amber)" }}>
+        : html`<div className="rounded-[10px] p-3 text-[12px]" style=${{ background: "var(--amber-50)", color: "var(--amber)" }}>
               <div className="font-semibold mb-0.5">Not eligible for installments</div>${q.installmentReason}</div>`}
         ${!compact && q.installmentEligible && html`<div className="mt-auto pt-2 text-[11px] muted">Selected: ${egp(planMonthly)} × ${p.plan} = ${egp(planTotal)}</div>`}
       </div>
@@ -182,10 +182,10 @@
           </div>
           <div className="flex items-center gap-1.5">
             ${[
-              ["primary", "Primary Plus (Age 6-10)"],
-              ["secondary", "Secondary Plus (Age 11-17)"],
-              ["adult", "Adults (18+)"],
-            ].map(([id, label]) => html`
+          ["primary", "Primary Plus (Age 6-10)"],
+          ["secondary", "Secondary Plus (Age 11-17)"],
+          ["adult", "Adults (18+)"],
+        ].map(([id, label]) => html`
               <button
                 key=${id}
                 type="button"
@@ -501,10 +501,10 @@
         <div className="mt-2.5 flex items-center justify-between text-[12px]">
           <div>
             ${!val.trim()
-              ? html`<span className="muted">Empty — connect SAP to search live records</span>`
-              : hasSessionId
-              ? html`<${Pill} tone="green" icon="check">SAP_SESSIONID found</${Pill}>`
-              : html`<${Pill} tone="amber" icon="alert">Warning: No SAP_SESSIONID detected in input</${Pill}>`}
+        ? html`<span className="muted">Empty — connect SAP to search live records</span>`
+        : hasSessionId
+          ? html`<${Pill} tone="green" icon="check">SAP_SESSIONID found</${Pill}>`
+          : html`<${Pill} tone="amber" icon="alert">Warning: No SAP_SESSIONID detected in input</${Pill}>`}
           </div>
           ${testing && html`<span className="muted flex items-center gap-1.5 text-[11.5px]">
             <${Icon} name="refresh" size=${13} className="animate-spin text-blue-600" />
@@ -556,6 +556,372 @@
     </div>`;
   }
 
+  // ==========================================================================
+  // Registration Details Modal (SAP ZHER_WA_REGISTRATION read-only view)
+  // ==========================================================================
+  function RegistrationDetailsModal({ booking, studentId, studentName, cachedResult, onDetailsLoaded, onRebook, onClose }) {
+    const [loading, setLoading] = useState(!cachedResult);
+    const [step, setStep] = useState("");
+    const [error, setError] = useState("");
+    const [liveData, setLiveData] = useState(cachedResult || null);
+    const [use12Hour, setUse12Hour] = useState(() => {
+      try {
+        return localStorage.getItem("sap_hub_time_format") !== "24h";
+      } catch (_) {
+        return true;
+      }
+    });
+
+    const toggleTimeFormat = (to12h) => {
+      const next = typeof to12h === "boolean" ? to12h : !use12Hour;
+      setUse12Hour(next);
+      try {
+        localStorage.setItem("sap_hub_time_format", next ? "12h" : "24h");
+      } catch (_) { }
+    };
+
+    async function loadFromSap() {
+      if (!studentId || !booking || !Svc.fetchRegistrationRowDetails) return;
+      setLoading(true);
+      setError("");
+      setStep("Reading registration details from SAP…");
+      try {
+        const res = await Svc.fetchRegistrationRowDetails({
+          studentId,
+          booking,
+          onStep: setStep,
+        });
+        setLiveData(res);
+        if (onDetailsLoaded) onDetailsLoaded(res);
+      } catch (err) {
+        setError(err.message || "Could not load SAP Registration details.");
+      } finally {
+        setLoading(false);
+        setStep("");
+      }
+    }
+
+    useEffect(() => {
+      if (!cachedResult) {
+        loadFromSap();
+      }
+    }, [studentId, booking && booking.className, booking && booking.session, booking && booking.status]);
+
+    if (!booking) return null;
+
+    const fmt12 = (SAPC && SAPC.formatClassTime12h) || ((x) => x);
+    const fmt24 = (SAPC && SAPC.formatClassTime24h) || ((x) => x);
+    const fmtClsTime = (str) => (use12Hour ? fmt12(str) : fmt24(str));
+    const cleanVal = (v) => {
+      let s = String(v || "").trim().replace(/\s*\bEmpty$/i, "").trim();
+      s = s.replace(/(?:Object abbr\.|Academic Session \(Desc\.\)|Academic Year|Start Date|End Date|CancDate|User Name|Amount)\s*$/i, "").trim();
+      if (!s || /^0000$/i.test(s) || /^00:00:00$/i.test(s) || /^empty$/i.test(s)) {
+        return "";
+      }
+      return s;
+    };
+    const dates = bookingDates(booking);
+    const hasLiveMatch = Boolean(liveData && liveData.foundInRegistrations);
+    const det = (hasLiveMatch && liveData && liveData.details) || {};
+    const matched = (hasLiveMatch && liveData && liveData.matchedRow) || {};
+    const cd = det.courseDetails || {};
+    const ch = det.changeData || {};
+    const it = det.itemTotal || {};
+    const po = det.paymentOptions || {};
+    const services = det.services || [];
+    const regs = (liveData && liveData.registrations) || [];
+
+    const pickUntruncatedClass = (...cands) => {
+      const valid = cands.map(cleanVal).filter(Boolean);
+      const full = valid.find((c) => !/\.{2,}$|…$/.test(c));
+      return full || valid[0] || "—";
+    };
+
+    const displayCourse = cleanVal(cd.course) || booking.courseCode || "—";
+    const displayYear = cleanVal(cd.year) || (String(booking.session || "").match(/\b(20\d{2})\b/)?.[1]) || "—";
+    const displayPeriod = cleanVal(cd.period) || dates.sessionName || "—";
+    const displayOrigin = cleanVal(cd.origin) || cleanVal(matched.bookingSource) || booking.bookingSource || "—";
+    const displayStatus = cleanVal(cd.status) || cleanVal(matched.status) || booking.status || "—";
+    const rawClass = pickUntruncatedClass(booking.className, cd.className, matched.className, booking.courseDescription);
+    const displayClass = fmtClsTime(rawClass);
+    const schedInfo = (SAPC && SAPC.parseClassScheduleInfo) ? SAPC.parseClassScheduleInfo(rawClass, booking.session || "") : {};
+    const exactTimeRange = use12Hour ? schedInfo.timeRange12h : schedInfo.timeRange24h;
+    const exactDays = schedInfo.daysText || "";
+    const exactScheduleSummary = [exactDays, exactTimeRange].filter(Boolean).join(" · ");
+
+    const displayBegin = cleanVal(cd.begin) || cleanVal(matched.startDate) || dates.start || "";
+    const displayEnd = cleanVal(cd.end) || cleanVal(matched.endDate) || dates.end || "";
+    const displayCancDate = cleanVal(cd.cancDate) || "";
+    const displayReason = cleanVal(cd.reason) || "";
+
+    const changedUser = cleanVal(ch.changed && ch.changed.user);
+    const changedDate = cleanVal(ch.changed && ch.changed.date);
+    const changedTimeRaw = cleanVal(ch.changed && ch.changed.time);
+    const changedTime = changedTimeRaw ? fmtClsTime(changedTimeRaw) : "";
+    const createdUser = cleanVal(ch.created && ch.created.user);
+    const createdDate = cleanVal(ch.created && ch.created.date) || booking.bookingDate || "";
+    const createdTimeRaw = cleanVal(ch.created && ch.created.time) || cleanVal(booking.bookingTime);
+    const createdTime = createdTimeRaw ? fmtClsTime(createdTimeRaw) : "";
+
+    const fieldRow = (lbl, val, mono = false) => html`
+      <div className="flex flex-col gap-0.5 bg-slate-50/80 border border-slate-200/80 rounded-[8px] px-2.5 py-1.5">
+        <span className="text-[10.5px] font-semibold text-slate-500 uppercase tracking-wide">${lbl}</span>
+        <span className=${`text-[12.5px] font-semibold text-slate-900 ${mono ? "num font-mono" : ""}`}>${val || "—"}</span>
+      </div>`;
+
+    return html`<div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs grid place-items-center z-[75] p-4" onClick=${onClose}>
+      <div className="card w-full max-w-[820px] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden bg-white" onClick=${(e) => e.stopPropagation()}>
+        <div className="px-5 py-3.5 border-b flex items-center justify-between gap-3 bg-slate-50/70" style=${{ borderColor: "var(--line)" }}>
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-lg grid place-items-center shrink-0" style=${{ background: "var(--bc-blue-50)", color: "var(--bc-blue)" }}>
+              <${Icon} name="calendar" size=${18} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-[15px] truncate" style=${{ color: "var(--bc-navy)" }}>
+                  Registration Details · ${fmtClsTime(booking.courseDescription || booking.courseCode)}
+                </span>
+                <${Pill} tone=${bookingStatusTone(displayStatus)}>${displayStatus}</${Pill}>
+              </div>
+              <div className="text-[11.5px] muted truncate">
+                ${studentName ? `${studentName} · ` : ""}ID ${studentId} · ${displayClass}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <div className="inline-flex rounded-[6px] border bg-slate-100 p-0.5 shrink-0" style=${{ borderColor: "var(--line)" }} title="Switch between 12-hour (AM/PM) and 24-hour time format">
+              <button
+                type="button"
+                onClick=${() => toggleTimeFormat(true)}
+                className=${`px-2 py-0.5 rounded-[5px] text-[11px] font-semibold transition-all ${use12Hour ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"}`}
+              >
+                12h
+              </button>
+              <button
+                type="button"
+                onClick=${() => toggleTimeFormat(false)}
+                className=${`px-2 py-0.5 rounded-[5px] text-[11px] font-semibold transition-all ${!use12Hour ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"}`}
+              >
+                24h
+              </button>
+            </div>
+            <button type="button" className="btn !h-7 !px-2.5 text-[11.5px]" onClick=${loadFromSap} disabled=${loading} title="Refresh from SAP Registration">
+              <${Icon} name="refresh" size=${13} className=${loading ? "animate-spin" : ""} />
+              <span>${loading ? "Loading…" : "Refresh SAP"}</span>
+            </button>
+            <button type="button" className="btn btn-icon !h-7 !w-7" onClick=${onClose} title="Close">
+              <${Icon} name="x" size=${15} />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-4 overflow-y-auto scroll-thin space-y-3.5 text-[12px]">
+          ${loading && html`
+            <div className="rounded-[8px] px-3 py-2 bg-blue-50 border border-blue-200 text-blue-900 flex items-center gap-2">
+              <${Icon} name="refresh" size=${14} className="animate-spin shrink-0" />
+              <span>${step || "Loading live registration details from SAP (read-only)…"}</span>
+            </div>
+          `}
+
+          ${error && html`
+            <div className="rounded-[8px] px-3 py-2 bg-amber-50 border border-amber-200 text-amber-900 flex items-start gap-2">
+              <${Icon} name="alert" size=${15} className="shrink-0 mt-0.5 text-amber-600" />
+              <div>
+                <b>Live SAP lookup note: </b>${error}
+                <div className="text-[11px] opacity-80 mt-0.5">Showing dates and details already loaded from SAP Booking History below.</div>
+              </div>
+            </div>
+          `}
+
+          ${liveData && !liveData.foundInRegistrations && !loading && html`
+            <div className="rounded-[8px] px-3 py-2 bg-slate-50 border border-slate-200 text-slate-700 flex items-center gap-2 text-[11.5px]">
+              <${Icon} name="info" size=${14} className="text-blue-600 shrink-0" />
+              <span>This booking is not listed in the active SAP Registrations table (or was archived). Showing aligned Booking History schedule dates below.</span>
+            </div>
+          `}
+
+          <!-- Course Details (mirrors SAP Registration details -> Course details) -->
+          <div className="rounded-[10px] border p-3 space-y-2.5" style=${{ borderColor: "var(--line)" }}>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="font-bold text-[13px] flex items-center gap-1.5" style=${{ color: "var(--bc-navy)" }}>
+                <${Icon} name="cap" size=${15} className="muted" />
+                <span>Course details</span>
+              </div>
+              ${liveData && liveData.foundInRegistrations && html`
+                <span className="pill pill-green !text-[10.5px] font-semibold">Live from SAP Registration</span>
+              `}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              ${fieldRow("Course", displayCourse, true)}
+              ${fieldRow("Year", displayYear, true)}
+              ${fieldRow("Period", displayPeriod)}
+              ${fieldRow("Origin", displayOrigin)}
+              ${fieldRow("Status", displayStatus)}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+              <div className="sm:col-span-2">
+                ${fieldRow("Class", displayClass)}
+              </div>
+              ${fieldRow("Begin", displayBegin ? fmtDate(displayBegin) : "—", true)}
+              ${fieldRow("End", displayEnd ? fmtDate(displayEnd) : "—", true)}
+              ${fieldRow("Canc.Date", displayCancDate ? fmtDate(displayCancDate) : "—", true)}
+            </div>
+            ${(exactScheduleSummary || displayBegin) && html`
+              <div className="rounded-[9px] bg-blue-50/75 border border-blue-200 px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10.5px] font-bold uppercase tracking-wider text-blue-800 bg-blue-100 px-2 py-0.5 rounded">
+                    Class Schedule (${use12Hour ? "12h" : "24h"})
+                  </span>
+                  <span className="text-[13px] font-bold text-slate-900 select-text">
+                    ${exactScheduleSummary || displayClass}
+                  </span>
+                  ${schedInfo.termText && html`<span className="pill pill-amber !text-[10px] font-bold font-mono">${schedInfo.termText}</span>`}
+                </div>
+                <div className="text-[12px] font-mono font-semibold text-blue-950 num whitespace-nowrap">
+                  ${displayBegin ? fmtDate(displayBegin) : "—"} → ${displayEnd ? fmtDate(displayEnd) : "—"}
+                </div>
+              </div>
+            `}
+            ${(displayReason || (dates.periodStart && displayBegin && dates.periodStart !== displayBegin)) && html`
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                ${displayReason && fieldRow("Reason", displayReason)}
+                ${dates.periodStart && displayBegin && dates.periodStart !== displayBegin && fieldRow(
+      "Academic Period Range",
+      `${fmtDate(dates.periodStart)} → ${fmtDate(dates.periodEnd)}`,
+      true
+    )}
+              </div>
+            `}
+          </div>
+
+          <!-- Change Data (Created / Changed user, date & time) -->
+          <div className="rounded-[10px] border p-3 space-y-2" style=${{ borderColor: "var(--line)" }}>
+            <div className="font-bold text-[13px] flex items-center gap-1.5" style=${{ color: "var(--bc-navy)" }}>
+              <${Icon} name="note" size=${15} className="muted" />
+              <span>Change data</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="bg-slate-50/80 border border-slate-200/80 rounded-[8px] px-3 py-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase">Created</span>
+                <div className="flex items-center gap-2 font-mono text-[12px] font-semibold text-slate-900">
+                  <span>${createdUser || "—"}</span>
+                  <span className="text-slate-300">·</span>
+                  <span>${createdDate ? fmtDate(createdDate) : "—"}</span>
+                  ${createdTime && html`<span className="text-slate-500">${createdTime}</span>`}
+                </div>
+              </div>
+              <div className="bg-slate-50/80 border border-slate-200/80 rounded-[8px] px-3 py-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase">Changed</span>
+                <div className="flex items-center gap-2 font-mono text-[12px] font-semibold text-slate-900">
+                  <span>${changedUser || "—"}</span>
+                  <span className="text-slate-300">·</span>
+                  <span>${changedDate ? fmtDate(changedDate) : "—"}</span>
+                  ${changedTime && html`<span className="text-slate-500">${changedTime}</span>`}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Course fee and Services + Item total -->
+          ${(services.length > 0 || it.payableAmount || it.totalAmount || po.instalmentType) && html`
+            <div className="rounded-[10px] border p-3 space-y-2.5" style=${{ borderColor: "var(--line)" }}>
+              <div className="font-bold text-[13px] flex items-center justify-between" style=${{ color: "var(--bc-navy)" }}>
+                <span className="flex items-center gap-1.5"><${Icon} name="coins" size=${15} className="muted" />Course fee and Services</span>
+                ${po.instalmentType && html`<span className="pill pill-blue !text-[10.5px]">Instalment: ${po.instalmentType}</span>`}
+              </div>
+              ${services.length > 0 && html`
+                <div className="overflow-x-auto border rounded-[8px]" style=${{ borderColor: "var(--line)" }}>
+                  <table className="tbl tbl-compact">
+                    <thead>
+                      <tr>
+                        <th>Service description</th>
+                        <th>Fee</th>
+                        <th>Discount</th>
+                        <th>Discounted fee</th>
+                        <th>Payable amount</th>
+                        <th>Currency</th>
+                        <th>Sponsored (%)</th>
+                        <th>Cancelled</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${services.map((sv, idx) => html`
+                        <tr key=${idx}>
+                          <td>${sv.serviceDescription || "Course Fee"}</td>
+                          <td className="num">${sv.fee || "—"}</td>
+                          <td className="num">${sv.discount || "0,00"}</td>
+                          <td className="num">${sv.discountedFee || "—"}</td>
+                          <td className="num font-semibold">${sv.payableAmount || "—"}</td>
+                          <td className="font-mono">${sv.currency || "EGP"}</td>
+                          <td className="num">${sv.sponsoredPct || "0,00"}</td>
+                          <td>${sv.cancelled === "Yes" ? html`<span className="pill pill-red !text-[10px]">Cancelled</span>` : "No"}</td>
+                        </tr>
+                      `)}
+                    </tbody>
+                  </table>
+                </div>
+              `}
+              ${(it.payableAmount || it.discountAmount || it.totalAmount) && html`
+                <div className="grid grid-cols-3 gap-2">
+                  ${fieldRow("Item Payable Amount", it.payableAmount || "0,00", true)}
+                  ${fieldRow("Discount Amount", it.discountAmount || "0,00", true)}
+                  ${fieldRow("Total Amount", it.totalAmount || "0,00", true)}
+                </div>
+              `}
+            </div>
+          `}
+
+          ${regs.length > 1 && html`
+            <div className="rounded-[10px] border p-3 space-y-2" style=${{ borderColor: "var(--line)" }}>
+              <div className="font-bold text-[12.5px] text-slate-700">All Registrations in Active SAP Table (${regs.length})</div>
+              <div className="overflow-x-auto border rounded-[8px]" style=${{ borderColor: "var(--line)" }}>
+                <table className="tbl tbl-compact">
+                  <thead>
+                    <tr>
+                      <th>Course & Session</th>
+                      <th>Class</th>
+                      <th>Status</th>
+                      <th>Start Date</th>
+                      <th>End Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${regs.map((r, i) => html`
+                      <tr key=${i} style=${r.selected ? { background: "var(--bc-blue-50)" } : null}>
+                        <td className="font-medium">${r.courseAndSession || "—"}</td>
+                        <td>${fmtClsTime(r.className || "—")}</td>
+                        <td><${Pill} tone=${bookingStatusTone(r.status)}>${r.status || "—"}</${Pill}></td>
+                        <td className="num whitespace-nowrap font-semibold">${r.startDate ? fmtDate(r.startDate) : "—"}</td>
+                        <td className="num whitespace-nowrap">${r.endDate ? fmtDate(r.endDate) : "—"}</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `}
+        </div>
+
+        <div className="px-5 py-3 border-t flex items-center justify-between gap-2 bg-slate-50/70" style=${{ borderColor: "var(--line)" }}>
+          <span className="text-[11px] muted flex items-center gap-1.5">
+            <${Icon} name="check" size=${13} className="text-emerald-600" />
+            Read-only view · SAP registration lock (EZ_COURSE_REG) automatically released
+          </span>
+          <div className="flex items-center gap-2">
+            ${onRebook && /cancel/i.test(displayStatus) && html`
+              <button type="button" className="btn !h-8 !px-3 text-[12px] font-semibold !bg-amber-50 hover:!bg-amber-100 !text-amber-800 !border-amber-300"
+                onClick=${() => { onClose(); onRebook(booking); }}>
+                <${Icon} name="zap" size=${13} className="text-amber-600" />
+                <span>Re-book Slot</span>
+              </button>
+            `}
+            <button type="button" className="btn btn-primary !h-8 !px-4 text-[12px]" onClick=${onClose}>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   global.AppScreens = {
     Toggle,
     PricingPanel,
@@ -563,5 +929,6 @@
     PageTitle,
     MappingScreen,
     SettingsModal,
+    RegistrationDetailsModal,
   };
 })(window);

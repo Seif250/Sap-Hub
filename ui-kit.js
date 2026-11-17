@@ -56,11 +56,14 @@
 
   // ---- Formatting ----------------------------------------------------------
   const egp = (n) => `${Math.round(Number(n) || 0).toLocaleString("en-US")} EGP`;
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   function fmtDate(d) {
     const dt = d instanceof Date ? d : KB.parseFlexibleDate(d);
     if (!dt || isNaN(dt)) return d || "—";
-    return `${dt.getDate()} ${MONTHS[dt.getMonth()]} ${dt.getFullYear()}`;
+    return `${dt.getDate()}/${dt.getMonth() + 1}/${dt.getFullYear()}`;
+  }
+  function fmtSapDotDate(dt) {
+    if (!dt || isNaN(dt)) return "";
+    return `${String(dt.getDate()).padStart(2, "0")}.${String(dt.getMonth() + 1).padStart(2, "0")}.${dt.getFullYear()}`;
   }
   function timeAgo(d) {
     if (!d) return "";
@@ -71,12 +74,77 @@
   }
 
   // ---- Booking helpers -----------------------------------------------------
+  const DAY_NAME_TO_NUM = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+  function extractClassWeekdays(className) {
+    const s = String(className || "");
+    const matches = s.match(/\b(Sun|Mon|Tue|Wed|Thu|Fri|Sat)(?=\b|\d|\/|\s|$)/gi) || [];
+    const nums = new Set();
+    matches.forEach((m) => {
+      const k = m.slice(0, 3).toLowerCase();
+      if (DAY_NAME_TO_NUM[k] !== undefined) nums.add(DAY_NAME_TO_NUM[k]);
+    });
+    return nums;
+  }
+
+  function alignDatesToClassDays(rawStart, rawEnd, className, isConsult) {
+    if (isConsult || !className || !rawStart) return { start: rawStart, end: rawEnd, adjusted: false };
+    const weekdays = extractClassWeekdays(className);
+    if (weekdays.size === 0) return { start: rawStart, end: rawEnd, adjusted: false };
+
+    const sDt = KB.parseFlexibleDate(rawStart);
+    const eDt = rawEnd ? KB.parseFlexibleDate(rawEnd) : null;
+    if (!sDt || isNaN(sDt)) return { start: rawStart, end: rawEnd, adjusted: false };
+
+    let adjStart = new Date(sDt.getFullYear(), sDt.getMonth(), sDt.getDate());
+    for (let i = 0; i < 7; i++) {
+      if (weekdays.has(adjStart.getDay())) break;
+      adjStart.setDate(adjStart.getDate() + 1);
+    }
+
+    let adjEnd = eDt && !isNaN(eDt) ? new Date(eDt.getFullYear(), eDt.getMonth(), eDt.getDate()) : null;
+    if (adjEnd) {
+      for (let i = 0; i < 7; i++) {
+        if (weekdays.has(adjEnd.getDay())) break;
+        adjEnd.setDate(adjEnd.getDate() - 1);
+      }
+      if (adjEnd < adjStart) adjEnd = eDt;
+    }
+
+    const newStart = fmtSapDotDate(adjStart);
+    const newEnd = adjEnd ? fmtSapDotDate(adjEnd) : rawEnd;
+    return {
+      start: newStart || rawStart,
+      end: newEnd || rawEnd,
+      adjusted: (newStart && newStart !== rawStart) || (newEnd && newEnd !== rawEnd),
+    };
+  }
+
   function bookingDates(b) {
     const m = String(b.session || "").match(/(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})/);
+    const periodStart = m ? m[1] : b.start || "";
+    const periodEnd = m ? m[2] : b.end || "";
+    const sessionName = String(b.session || "").replace(/\s*\d{2}\.\d{2}\.\d{4}.*/, "");
+
+    if (b.actualStartDate || b.actualEndDate) {
+      return {
+        start: b.actualStartDate || periodStart,
+        end: b.actualEndDate || periodEnd,
+        periodStart,
+        periodEnd,
+        sessionName,
+        isAdjustedToClassDay: true,
+      };
+    }
+
+    const isConsult = /ylcon|adcon|consultation|placement|assessment/i.test(`${b.courseCode} ${b.courseDescription} ${b.className}`);
+    const aligned = alignDatesToClassDays(periodStart, periodEnd, b.className, isConsult);
     return {
-      start: m ? m[1] : b.start || "",
-      end: m ? m[2] : b.end || "",
-      sessionName: String(b.session || "").replace(/\s*\d{2}\.\d{2}\.\d{4}.*/, "")
+      start: aligned.start,
+      end: aligned.end,
+      periodStart,
+      periodEnd,
+      sessionName,
+      isAdjustedToClassDay: aligned.adjusted,
     };
   }
   function bookingStatusTone(status) {

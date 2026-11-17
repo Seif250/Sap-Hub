@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // SAP Service — framework-agnostic session lifecycle on top of SAPClient
 // (GET → LoadingPlaceHolder_Load → Search → Open student → Booking history)
 // UI code should only call: SapService.search(), SapService.openStudent(), SapService.reset()
@@ -34,20 +34,24 @@
   // --- Extension Direct Bridge State & Communication ---
   let extensionBridgeAvailable = !!document.documentElement.getAttribute("data-sap-hub-bridge");
   let extensionBridgeVersion = document.documentElement.getAttribute("data-sap-hub-bridge") || null;
+  let extensionPingChecked = extensionBridgeAvailable;
 
   window.addEventListener("message", (evt) => {
     if (evt.data && evt.data.source === "SAP_BRIDGE" && (evt.data.type === "ANNOUNCE" || evt.data.type === "PONG")) {
       extensionBridgeAvailable = true;
+      extensionPingChecked = true;
       if (evt.data.version) extensionBridgeVersion = evt.data.version;
     }
   });
 
   function pingExtensionBridge(timeoutMs = 350) {
     if (extensionBridgeAvailable) return Promise.resolve(true);
+    if (extensionPingChecked) return Promise.resolve(false);
     return new Promise((resolve) => {
       const requestId = "ping_" + Math.random().toString(36).slice(2);
       const timer = setTimeout(() => {
         window.removeEventListener("message", handler);
+        extensionPingChecked = true;
         resolve(false);
       }, timeoutMs);
 
@@ -56,6 +60,7 @@
           clearTimeout(timer);
           window.removeEventListener("message", handler);
           extensionBridgeAvailable = true;
+          extensionPingChecked = true;
           if (e.data.version) extensionBridgeVersion = e.data.version;
           resolve(true);
         }
@@ -157,21 +162,24 @@
   }
 
   async function fetchServerSyncedCookie() {
-    // 1. Direct browser extension query
-    try {
-      const extRes = await callExtensionAction("GET_ACTIVE_COOKIES", {}, 1200);
-      if (extRes && extRes.ok && extRes.cookie) {
-        localStorage.setItem("sap_hub_cookie", extRes.cookie);
-        return {
-          ok: true,
-          hasCookie: true,
-          hasSessionId: !!extRes.hasSessionId,
-          cookie: extRes.cookie,
-          source: "extension",
-          updatedAt: extRes.updatedAt || new Date().toISOString()
-        };
-      }
-    } catch (e) {}
+    // 1. Direct browser extension query (only if extension bridge is present)
+    const hasBridge = extensionBridgeAvailable || (await pingExtensionBridge(250));
+    if (hasBridge) {
+      try {
+        const extRes = await callExtensionAction("GET_ACTIVE_COOKIES", {}, 1200);
+        if (extRes && extRes.ok && extRes.cookie) {
+          localStorage.setItem("sap_hub_cookie", extRes.cookie);
+          return {
+            ok: true,
+            hasCookie: true,
+            hasSessionId: !!extRes.hasSessionId,
+            cookie: extRes.cookie,
+            source: "extension",
+            updatedAt: extRes.updatedAt || new Date().toISOString()
+          };
+        }
+      } catch (e) {}
+    }
 
     // 2. Local or edge server (/api/get-cookies)
     try {
@@ -867,11 +875,49 @@
       let bookings = [];
       let historyError = null;
       try {
-        const { historyPopupId, bookingHistoryItemId, historyMenuBtn } = det.menuIds;
-        const h = await proxy({
+        let { historyPopupId, bookingHistoryItemId, historyMenuBtn } = det.menuIds;
+        let h = await proxy({
           url: sess.contextUrl, method: "POST", cookie: sess.cookie,
           body: postBody(sess.secureId, SAP.buildBookingHistoryQueue(historyPopupId, bookingHistoryItemId, historyMenuBtn)),
         });
+
+        // Auto-recover if SAP returned HTTP 500 or stale menu/context state (e.g. after tab switches or shifted IDs)
+        if (!h.ok || !h.body || h.status >= 500 || h.body.includes("SAMLRequest") || h.sessionState === "RELEASED") {
+          onStep && onStep("Refreshing SAP student view to load booking history…");
+          try {
+            sess = await connect(onStep);
+            const freshCrit = [{ label: "Student ID", controlId: sess.controls.studentId, value: studentId }];
+            const sr = await runSearch(sess, freshCrit);
+            if (sr.ok && sr.body) {
+              sess.cookie = SAP.mergeCookies(sess.cookie, sr.setCookie);
+              SAP.applySapDeltaUpdates(sr.body, vdom);
+              const freshList = SAP.parseSearchResults(vdom, sr.body);
+              const exactStudent = freshList.find((s) => s.studentNumber === studentId) || freshList[0];
+              if (exactStudent && exactStudent.linkId) {
+                const d2 = await proxy({
+                  url: sess.contextUrl, method: "POST", cookie: sess.cookie,
+                  body: postBody(sess.secureId, SAP.buildLinkActivateQueue(exactStudent.linkId)),
+                });
+                if (d2.ok && d2.body) {
+                  sess.cookie = SAP.mergeCookies(sess.cookie, d2.setCookie);
+                  vdom.innerHTML = "";
+                  SAP.applySapDeltaUpdates(d2.body, vdom);
+                  const det2 = SAP.parseStudentDetailScreen(vdom, d2.body);
+                  sess.backToSearchBtn = (det2.menuIds && det2.menuIds.backToSearchBtn) || sess.backToSearchBtn;
+                  sess.screen = "DETAIL";
+                  const m2 = det2.menuIds || {};
+                  h = await proxy({
+                    url: sess.contextUrl, method: "POST", cookie: sess.cookie,
+                    body: postBody(sess.secureId, SAP.buildBookingHistoryQueue(m2.historyPopupId || historyPopupId, m2.bookingHistoryItemId || bookingHistoryItemId, m2.historyMenuBtn || historyMenuBtn)),
+                  });
+                }
+              }
+            }
+          } catch (retryErr) {
+            console.warn("Booking history recovery attempt note:", retryErr);
+          }
+        }
+
         if (h.ok && h.body) {
           sess.cookie = SAP.mergeCookies(sess.cookie, h.setCookie);
           SAP.applySapDeltaUpdates(h.body, vdom);

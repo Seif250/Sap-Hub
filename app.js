@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // SAP Student Sales Copilot — App shell & screens
 // Data: SapService (live SAP only)
 // Rules & pricing: BCKnowledgeBase only. No hardcoded calculations here.
@@ -557,7 +557,7 @@
             </button>
             ${m.balance && (m.balance.isCredit || m.balance.isDebt) && html`
               <span className=${`pill ${m.balance.isCredit ? "pill-blue" : "pill-red"} !text-[11px] font-medium`}>
-                ${m.balance.isCredit ? `Credit: ${m.balance.formatted}` : `Debt: +${m.balance.formatted}`}
+                ${m.balance.isCredit ? `Credit: ${m.balance.formatted}` : `Debt: ${m.balance.formatted}`}
               </span>
             `}
           </div>
@@ -760,7 +760,7 @@
                 <${Icon} name="alert" size=${16} className="text-red-600 shrink-0" />
                 <span><b>Outstanding balance owed (${m.balance.formatted}):</b> unpaid balance in SAP (FPL9) is added automatically to the total.</span>
               </div>
-              <span className="pill pill-red shrink-0 font-bold">Debt: +${m.balance.formatted}</span>
+              <span className="pill pill-red shrink-0 font-bold">Debt: ${m.balance.formatted}</span>
             </div>
           `}
 
@@ -774,7 +774,7 @@
             <div className="flex items-center gap-1.5" title="SAP Account Balance (FPL9)">
               <${Icon} name="card" className="muted" size=${14} /><span className="muted">Balance:</span>
               <${Pill} tone=${m.balance.isCredit ? "blue" : m.balance.isDebt ? "red" : "green"}>
-                ${m.balance.isCredit ? `${m.balance.formatted} (Credit)` : m.balance.isDebt ? `+${m.balance.formatted} (Debt)` : "0 EGP (Settled)"}
+                ${m.balance.isCredit ? `${m.balance.formatted} (Credit)` : m.balance.isDebt ? `${m.balance.formatted} (Debt)` : "0 EGP (Settled)"}
               </${Pill}>
             </div>
             ${!m.isAdult && html`
@@ -827,10 +827,10 @@
     </section>`;
   }
 
-  const { Toggle, PricingPanel, PricingScreen, PageTitle, MappingScreen, SettingsModal } = global.AppScreens;
+  const { Toggle, PricingPanel, PricingScreen, PageTitle, MappingScreen, SettingsModal, RegistrationDetailsModal } = global.AppScreens;
   // Booking history
   // ==========================================================================
-  function BookingHistory({ bookings, error, progression, onRebook, maxHeight = 400 }) {
+  function BookingHistory({ bookings, error, progression, onRebook, onInspectBooking, maxHeight = 400 }) {
     const counts = {
       all: bookings.length,
       courses: bookings.filter((b) => !isConsultation(b)).length,
@@ -919,7 +919,11 @@
                 const termAlreadyBooked = SAPC.isTermAlreadyBooked ? SAPC.isTermAlreadyBooked(r, bookings) : false;
                 const showRebookBtn = isCan && !isConsultation(r) && !hasAnyPrebooked && !termAlreadyBooked;
                 const isNew = Boolean(r.isNewlyBooked || r._isNew);
-                return html`<tr key=${i} style=${isNew ? { backgroundColor: "rgba(16, 185, 129, 0.08)", borderLeft: "3.5px solid #10b981" } : null}>
+                return html`<tr key=${i}
+                  onClick=${() => onInspectBooking && onInspectBooking(r)}
+                  className="cursor-pointer hover:bg-blue-50/45 transition-colors"
+                  title="Click row to open SAP Registration details (Begin, End, Canc.Date, Created/Changed, Fees)"
+                  style=${isNew ? { backgroundColor: "rgba(16, 185, 129, 0.08)", borderLeft: "3.5px solid #10b981" } : null}>
                 <td>
                   <div className="flex items-center gap-2">
                     <div className="font-medium">${fmt12(r.courseDescription || r.courseCode)}</div>
@@ -927,8 +931,13 @@
                   </div>
                   <div className="muted text-[11px]">${r.courseCode}${r.className && r.className !== r.courseDescription ? ` · ${fmt12(r.className)}` : ""}</div>
                 </td>
-                <td className="num whitespace-nowrap">${fmtDate(r.bookingDate)}</td>
-                <td className="num whitespace-nowrap">${r.start ? fmtDate(r.start) : "—"}</td>
+                <td className="num whitespace-nowrap">${r.bookingDate ? fmtDate(r.bookingDate) : "—"}</td>
+                <td className="num whitespace-nowrap font-medium">
+                  <span>${r.start ? fmtDate(r.start) : "—"}</span>
+                  ${r.isAdjustedToClassDay && r.periodStart && r.periodStart !== r.start && html`
+                    <span className="ml-1 text-[10px] text-blue-600 font-normal" title=${`Academic period: ${fmtDate(r.periodStart)} → ${fmtDate(r.periodEnd)} (aligned to class weekday)`}>•</span>
+                  `}
+                </td>
                 <td className="num whitespace-nowrap">${r.end ? fmtDate(r.end) : "—"}</td>
                 <td>
                   <div className="flex items-center gap-1.5 flex-wrap">
@@ -943,17 +952,28 @@
                 </td>
                 <td className="whitespace-nowrap">${(r.teachingCentre || "—").replace(/\s*Teaching Centre/i, "")}</td>
                 <td className="text-right whitespace-nowrap">
-                  ${showRebookBtn ? html`
+                  <div className="flex items-center justify-end gap-1.5">
+                    ${showRebookBtn && html`
+                      <button
+                        type="button"
+                        className="btn !h-6 !px-2 text-[11px] font-semibold !bg-amber-50 hover:!bg-amber-100 !text-amber-800 !border-amber-300 flex items-center gap-1 shadow-2xs"
+                        onClick=${(e) => { e.stopPropagation(); onRebook && onRebook(r); }}
+                        title="Re-book this exact cancelled slot in SAP"
+                      >
+                        <${Icon} name="zap" size=${11} className="text-amber-600" />
+                        <span>Re-book</span>
+                      </button>
+                    `}
                     <button
                       type="button"
-                      className="btn !h-6 !px-2 text-[11px] font-semibold !bg-amber-50 hover:!bg-amber-100 !text-amber-800 !border-amber-300 flex items-center gap-1 ml-auto shadow-2xs"
-                      onClick=${() => onRebook && onRebook(r)}
-                      title="Re-book this exact cancelled slot in SAP"
+                      className="btn !h-6 !px-2 text-[11px] text-slate-600 hover:text-blue-700 flex items-center gap-1"
+                      onClick=${(e) => { e.stopPropagation(); onInspectBooking && onInspectBooking(r); }}
+                      title="View full SAP Registration details"
                     >
-                      <${Icon} name="zap" size=${11} className="text-amber-600" />
-                      <span>Re-book</span>
+                      <${Icon} name="info" size=${12} />
+                      <span>Details</span>
                     </button>
-                  ` : html`<span className="text-slate-300 text-[11px]">—</span>`}
+                  </div>
                 </td>
               </tr>`;
               })}</tbody></table></div>`}
@@ -1006,7 +1026,7 @@
                     <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1 rounded">#${idx + 1}</span>
                     <b className="text-slate-800">${fmt12(b.className || b.courseDescription || b.courseCode)}</b>
                     ${branchName && html`<span className="text-slate-500 text-[11px]">(${branchName})</span>`}
-                    ${dates.start && html`<span className="text-slate-400 text-[10.5px] num">${dates.start} → ${dates.end}</span>`}
+                    ${dates.start && html`<span className="text-slate-400 text-[10.5px] num">${fmtDate(dates.start)} → ${fmtDate(dates.end)}</span>`}
                   </span>
                 `;
               })}
@@ -1031,7 +1051,7 @@
   // Student Lookup screen
   // ==========================================================================
   function LookupScreen({ ctx }) {
-    const { query, setQuery, runSearch, clear, loading, step, error, setError, results, current, pick, model, pricing, inputRef, cache, openSettings, bookingOpen, onToggleBooking, onRebookCancelled, setPage, studentTab, setStudentTab } = ctx;
+    const { query, setQuery, runSearch, clear, loading, step, error, setError, results, current, pick, model, pricing, inputRef, cache, openSettings, bookingOpen, onToggleBooking, onRebookCancelled, onInspectBooking, setPage, studentTab, setStudentTab } = ctx;
     const tab = studentTab || "history";
     const setTab = setStudentTab || (() => {});
     useEffect(() => { setTab("history"); }, [current && current.profile && current.profile.studentId]);
@@ -1075,7 +1095,7 @@
             html`<button key=${k} className=${`tab ${tab === k ? "active" : ""}`} onClick=${() => setTab(k)}><${Icon} name=${ic} size=${14} />${l}</button>`)}
         </div>
         <div>
-          ${tab === "history" && html`<${BookingHistory} bookings=${current.bookings} error=${current.historyError} progression=${model.progression} onRebook=${onRebookCancelled} />`}
+          ${tab === "history" && html`<${BookingHistory} bookings=${current.bookings} error=${current.historyError} progression=${model.progression} onRebook=${onRebookCancelled} onInspectBooking=${onInspectBooking} />`}
           ${tab === "notes" && html`<${NotesPanel} profile=${current.profile} progression=${model.progression} model=${model} />`}
           ${tab === "pricing" && html`<div className="grid grid-cols-[260px_1fr] gap-3">
               <${RecentBookings} bookings=${current.bookings} onViewAll=${() => setTab("history")} />
@@ -1249,7 +1269,7 @@
                           </div>
                         `}
                       </td>
-                      <td className="num whitespace-nowrap text-[11.5px]">${n.createdOn || "—"}</td>
+                      <td className="num whitespace-nowrap text-[11.5px]">${n.createdOn ? fmtDate(n.createdOn) : "—"}</td>
                       <td className="text-[11.5px] font-mono">${n.createdBy || "—"}</td>
                     </tr>`;
                   })}
@@ -1338,9 +1358,9 @@
                     </td>
                     <td className="text-[12px]">${r.origin || "—"}</td>
                     <td className="text-[12px] font-medium">${r.reference || "—"}</td>
-                    <td className="num text-[11.5px] whitespace-nowrap">${r.validUntil || "—"}</td>
+                    <td className="num text-[11.5px] whitespace-nowrap">${r.validUntil ? fmtDate(r.validUntil) : "—"}</td>
                     <td className="text-[11.5px] font-mono">${r.changedBy || "—"}</td>
-                    <td className="num text-[11.5px] whitespace-nowrap">${r.changedOn || (r.timestamp ? r.timestamp.split(" ")[0] : "—")}</td>
+                    <td className="num text-[11.5px] whitespace-nowrap">${r.changedOn ? fmtDate(r.changedOn) : r.timestamp ? fmtDate(r.timestamp.split(" ")[0]) : "—"}</td>
                   </tr>`;
                 })}
               </tbody>
@@ -1355,7 +1375,7 @@
           title="Account Balance Details (FPL9)"
           icon="card"
           badge=${html`<span className=${`pill ${profile.accountBalance.isCredit ? "pill-blue" : profile.accountBalance.isDebt ? "pill-red" : "pill-green"} !text-[11px] font-bold`}>
-            ${profile.accountBalance.isCredit ? `Credit: ${profile.accountBalance.formatted}` : profile.accountBalance.isDebt ? `Amount due: +${profile.accountBalance.formatted}` : "Fully settled (0 EGP)"}
+            ${profile.accountBalance.isCredit ? `Credit: ${profile.accountBalance.formatted}` : profile.accountBalance.isDebt ? `Amount due: ${profile.accountBalance.formatted}` : "Fully settled (0 EGP)"}
           </span>`}
           defaultOpen=${true}
         >
@@ -1404,6 +1424,8 @@
     const [bookingOpen, setBookingOpen] = useState(false);
     const [bookingInitialClasses, setBookingInitialClasses] = useState(null);
     const [studentTab, setStudentTab] = useState("history");
+    const [selectedBookingDetail, setSelectedBookingDetail] = useState(null);
+    const [regDetailsCache, setRegDetailsCache] = useState({});
     const [toast, setToast] = useState(null);
     const inputRef = useRef(null);
     const searchSeqRef = useRef(0);
@@ -1699,10 +1721,51 @@
       }, 600);
     }
 
+    const getRegDetailKey = (sId, b) =>
+      `${String(sId || "").padStart(10, "0")}|${(b && b.className) || ""}|${(b && b.session) || ""}|${(b && b.status) || ""}`;
+
+    function handleBookingDetailsLoaded(booking, res) {
+      if (!current || !current.profile || !res) return;
+      const sId = String(current.profile.studentId || current.profile.studentNumber || "").padStart(10, "0");
+      const key = getRegDetailKey(sId, booking);
+      setRegDetailsCache((prev) => ({ ...prev, [key]: res }));
+
+      const cd = (res.details && res.details.courseDetails) || {};
+      const ch = (res.details && res.details.changeData) || {};
+      const matched = res.matchedRow || {};
+      const actualStart = cd.begin || matched.startDate || "";
+      const actualEnd = cd.end || matched.endDate || "";
+      const createdDate = (ch.created && ch.created.date) || "";
+      const createdTime = (ch.created && ch.created.time) || "";
+
+      if (actualStart || actualEnd || createdDate) {
+        const updatedBookings = (current.bookings || []).map((b) => {
+          const sameRow =
+            b.className === booking.className &&
+            b.session === booking.session &&
+            b.status === booking.status;
+          if (!sameRow) return b;
+          return {
+            ...b,
+            actualStartDate: actualStart || b.actualStartDate,
+            actualEndDate: actualEnd || b.actualEndDate,
+            bookingDate: b.bookingDate || createdDate || b.bookingDate,
+            bookingTime: b.bookingTime || createdTime || b.bookingTime,
+          };
+        });
+        const updatedCurr = { ...current, bookings: updatedBookings };
+        setCurrent((curr) =>
+          curr && curr.profile && String(curr.profile.studentId || "").padStart(10, "0") === sId ? updatedCurr : curr
+        );
+        setCache((prev) => ({ ...prev, [sId]: updatedCurr }));
+      }
+    }
+
     const ctx = { query, setQuery, runSearch, clear, loading, step, error, setError, results, current, model, pricing, inputRef, cache,
       pick: (r) => openRow(r), openSettings: () => setSettings(true),
       bookingOpen, onToggleBooking: () => setBookingOpen((v) => !v),
       onRebookCancelled: handleRebookCancelled,
+      onInspectBooking: (b) => setSelectedBookingDetail(b),
       setPage,
       studentTab, setStudentTab };
 
@@ -1716,6 +1779,15 @@
           ${page === "mapping" && html`<${MappingScreen} model=${model} current=${current} />`}
         </main>
       </div>
+      ${selectedBookingDetail && current && current.profile && RegistrationDetailsModal && html`<${RegistrationDetailsModal}
+        booking=${selectedBookingDetail}
+        studentId=${current.profile.studentId}
+        studentName=${SAPC.formatStudentName(current.profile.fullName)}
+        cachedResult=${regDetailsCache[getRegDetailKey(current.profile.studentId, selectedBookingDetail)] || null}
+        onDetailsLoaded=${(res) => handleBookingDetailsLoaded(selectedBookingDetail, res)}
+        onRebook=${handleRebookCancelled}
+        onClose=${() => setSelectedBookingDetail(null)}
+      />`}
       ${bookingOpen && global.BookingModal && html`<${global.BookingModal}
         current=${current}
         model=${model}
@@ -1754,7 +1826,7 @@
                   <div key=${idx} className="flex items-center gap-1.5 text-[11px] text-emerald-300 font-medium truncate">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
                     <span className="truncate">${it.className}</span>
-                    ${it.startDate && html`<span className="text-slate-400 text-[10px] num">(${it.startDate})</span>`}
+                    ${it.startDate && html`<span className="text-slate-400 text-[10px] num">(${fmtDate(it.startDate)})</span>`}
                   </div>
                 `)}
               </div>
