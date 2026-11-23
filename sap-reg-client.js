@@ -268,6 +268,7 @@
     classDescInputId: "WD04A8",
     searchBtnId: "WD0562",
     scheduleTableId: "WD0592",
+    serviceListTableId: null,
     tacCheckboxId: "WD1050",
     tacCheckboxIds: [],
     uncheckedTacCheckboxIds: [],
@@ -278,6 +279,36 @@
     guardiansList: [],
   };
 
+  function findVListTableId(dec) {
+    if (!dec) return null;
+    const vListHint =
+      dec.match(/id="(WD[0-9A-F]+)"[^>]*V_LIST\.DYNAMIC_TABLE/i) ||
+      dec.match(/V_LIST\.DYNAMIC_TABLE[^>]*\bid="(WD[0-9A-F]+)"/i);
+    if (vListHint) return vListHint[1];
+
+    const vListRow = dec.match(/<tr[^>]*\bid="(WD[0-9A-F]+)-mrss-cont[^"]*"[^>]*>[\s\S]{0,1500}?V_LIST\.E_STEXT_E/i);
+    if (vListRow) return vListRow[1];
+
+    const popupSection = dec.match(/id="WDWL1"[\s\S]{0,6000}/i);
+    if (popupSection) {
+      const popTbl =
+        popupSection[0].match(/id="(WD[0-9A-F]+)-mrss-cont/i) ||
+        popupSection[0].match(/<table[^>]+id="(WD[0-9A-F]+)"[^>]*ct="ST/i);
+      if (popTbl) return popTbl[1];
+    }
+
+    const mrssRe = /id="(WD[0-9A-F]+)-mrss-cont/gi;
+    let m;
+    while ((m = mrssRe.exec(dec)) !== null) {
+      const slice = dec.slice(Math.max(0, m.index - 400), m.index + 800);
+      if (!/LIST_VIEW\.(?:DYNAMIC_TABLE|TAC_FPM_CE)/i.test(slice)) return m[1];
+    }
+    const stMatch =
+      dec.match(/<table[^>]+id="(WD[0-9A-F]+)"[^>]*ct="ST/i) ||
+      dec.match(/id="(WD[0-9A-F]+)"[^>]+ct="STCS"/i);
+    return stMatch ? stMatch[1] : null;
+  }
+
   function parseRegistrationControls(rawXml, includeDefaults = false) {
     const unescaped = String(rawXml || "")
       .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
@@ -287,12 +318,54 @@
     const findInputByTitle = (titleRe) => {
       const re = new RegExp(`<input[^>]*\\btitle="${titleRe}"[^>]*>`, "gi");
       let m;
+      let lastId = null;
       while ((m = re.exec(dec)) !== null) {
         const tag = m[0];
         const idM = tag.match(/\bid="(WD[0-9A-F]+)"/i);
-        if (idM) return idM[1];
+        if (idM) lastId = idM[1];
       }
-      return null;
+      return lastId;
+    };
+
+    const findSelectOptionInput = (labelRe) => {
+      const wdwlIdx = dec.lastIndexOf('id="WDWL1"');
+      const scope = wdwlIdx >= 0 ? dec.slice(wdwlIdx) : dec;
+      const normalizeId = (rawId) => (rawId ? rawId.replace(/-r$/i, "") : null);
+
+      const inpAttrRe = new RegExp(`<input\\b[^>]*\\b(?:title|aria-label)="${labelRe}"[^>]*>`, "gi");
+      let m;
+      let found = null;
+      while ((m = inpAttrRe.exec(scope)) !== null) {
+        const idM = m[0].match(/\bid="(WD[0-9A-F]+)"/i);
+        if (idM) found = normalizeId(idM[1]);
+      }
+      if (found) return found;
+
+      const lblRe = /<label\b[^>]*\blsdata='([^']*)'[^>]*>([\s\S]*?)<\/label>/gi;
+      const textExactRe = new RegExp(`^(?:${labelRe})\\s*:?$`, "i");
+      const lsTitleRe = new RegExp(`["']3["']\\s*:\\s*["'](?:${labelRe})["']`, "i");
+      while ((m = lblRe.exec(scope)) !== null) {
+        const tag = m[0];
+        const ls = m[1];
+        const innerTxt = cleanSapCellText(m[2].replace(/<[^>]+>/g, ""));
+        if (lsTitleRe.test(ls) || textExactRe.test(innerTxt)) {
+          const targetM =
+            ls.match(/["']1["']\s*:\s*["'](WD[0-9A-F]+(?:-r)?)["']/i) ||
+            tag.match(/\bfor="(WD[0-9A-F]+(?:-r)?)"/i);
+          if (targetM) found = normalizeId(targetM[1]);
+        }
+      }
+      if (found) return found;
+
+      const lblIdRe = new RegExp(`<label\\b[^>]*\\bid="(WD[0-9A-F]+)"[^>]*>[\\s\\S]{0,120}?${labelRe}\\s*:?[\\s\\S]{0,40}?<\\/label>`, "gi");
+      while ((m = lblIdRe.exec(scope)) !== null) {
+        const lblId = m[1];
+        const inpByLbl =
+          scope.match(new RegExp(`<input\\b[^>]*\\baria-labelledby="${lblId}"[^>]*\\bid="(WD[0-9A-F]+)"`, "i")) ||
+          scope.match(new RegExp(`<input\\b[^>]*\\bid="(WD[0-9A-F]+)"[^>]*\\baria-labelledby="${lblId}"`, "i"));
+        if (inpByLbl) found = normalizeId(inpByLbl[1]);
+      }
+      return found || findInputByTitle(labelRe);
     };
 
     const findTagIdByHint = (hintRe) => {
@@ -424,19 +497,37 @@
       }
     }
 
-    // Registrations table ID & row count (FPM_LIST_UIBB_ATS.LIST_VIEW.DYNAMIC_TABLE or SapTableCS control update)
+    // Registrations table ID & row count (ID_00010018:LIST_VIEW — exclude Course fee & Services ID_00010020)
     let regListTableId = null;
     const regTableM =
+      dec.match(/id="(WD[0-9A-F]+)"[^>]*data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE/i) ||
+      dec.match(/data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE[^"]*id="(WD[0-9A-F]+)"/i) ||
       dec.match(/id="(WD[0-9A-F]+)"[^>]*data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE/i) ||
       dec.match(/data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE[^"]*id="(WD[0-9A-F]+)"/i) ||
-      dec.match(/<control-update\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*updateMethod="PARTIAL"[^>]*><content><!\[CDATA\[<table\b[^>]*\b(?:iVisibleContentRowCount|iContentRowCount)/i) ||
-      dec.match(/<(?:table|div)\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*\bct="STCS"[^>]*lsdata='\{[^']*?["']0["']\s*:\s*["']LIST_VIEW/i);
+      dec.match(/<(?:table|div)\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*\bct="STCS"[^>]*lsdata='\{[^']*?["']0["']\s*:\s*["']LIST_VIEW[^']*?'[^>]*>[\s\S]{0,1200}?(?:SM_SHORT_FPM_CE|EVENT_FPM_CE|Course\/Consultation)/i);
     if (regTableM) {
       regListTableId = regTableM[1];
+    } else {
+      const partialTblRe = /<control-update\b[^>]*\bid="(WD[0-9A-F]+)"[^>]*updateMethod="PARTIAL"[^>]*><content><!\[CDATA\[<table\b[^>]*\b(?:iVisibleContentRowCount|iContentRowCount)[^>]*>([\s\S]{0,2000})/gi;
+      let pmTbl;
+      while ((pmTbl = partialTblRe.exec(dec)) !== null) {
+        if (/SM_SHORT_FPM_CE|EVENT_FPM_CE|SMSTATUS_FPM_CE|ID_00010018/i.test(pmTbl[2]) && !/SERVICE_FPM_CE|ID_00010020/i.test(pmTbl[2])) {
+          regListTableId = pmTbl[1];
+          break;
+        }
+      }
     }
+    const serviceTblM =
+      dec.match(/id="(WD[0-9A-F]+)"[^>]*data-hint="[^"]*ID_00010020:LIST_VIEW\.DYNAMIC_TABLE/i) ||
+      dec.match(/data-hint="[^"]*ID_00010020:LIST_VIEW\.DYNAMIC_TABLE[^"]*id="(WD[0-9A-F]+)"/i);
+    const serviceListTableId = serviceTblM ? serviceTblM[1] : null;
     const hasSpacerFragment = /bIsSpacerFragment="true"/i.test(dec);
     const tableCrcM =
-      (regListTableId ? dec.match(new RegExp(`id="${regListTableId}"[^>]*crc="(\\d+)"`, "i")) : null) ||
+      (regListTableId ? (
+        dec.match(new RegExp(`id="${regListTableId}"[^>]*crc="(\\d+)"`, "i")) ||
+        dec.match(new RegExp(`<control-update\\b[^>]*\\bid="${regListTableId}"[^>]*>[\\s\\S]{0,400}?\\biContentRowCount="(\\d+)"`, "i"))
+      ) : null) ||
+      dec.match(/data-hint="[^"]*ID_00010018:LIST_VIEW\.DYNAMIC_TABLE"[^>]*crc="(\d+)"/i) ||
       dec.match(/data-hint="[^"]*(?:ID_[0-9A-F]+:)?LIST_VIEW\.DYNAMIC_TABLE"[^>]*crc="(\d+)"/i) ||
       dec.match(/<table\b[^>]*\biContentRowCount="(\d+)"/i) ||
       dec.match(/<table\b[^>]*\biVisibleContentRowCount="(\d+)"/i);
@@ -532,12 +623,8 @@
       }
     }
 
-    // Table ID in search popup
-    const scheduleTblMatch =
-      dec.match(/id="(WD[0-9A-F]+)-mrss-cont/i) ||
-      dec.match(/<table[^>]+id="(WD[0-9A-F]+)"[^>]*ct="ST/i) ||
-      dec.match(/id="(WD[0-9A-F]+)"[^>]+(?:ct="STCS"|data-hint="[^"]*DYNAMIC_TABLE)/i);
-    const scheduleTableId = scheduleTblMatch ? scheduleTblMatch[1] : (findTagIdByHint("V_LIST\\.DYNAMIC_TABLE") || "WD0592");
+    // Table ID in search popup (strictly prefer V_LIST over background LIST_VIEW)
+    const scheduleTableId = findVListTableId(dec) || "WD0592";
 
     // Guardian / Sponsor / Related Person ComboBox & Guardians List in Header Data
     let guardianComboId =
@@ -554,13 +641,26 @@
 
     const guardiansList = [];
     const seenGuardianKeys = new Set();
-    const libItemRe = /<div[^>]*\bct="LIB_I"[^>]*\bdata-itemkey="(\d{9,10})"[^>]*\bdata-itemvalue1="([^"]*)"[^>]*>/gi;
-    let gm;
-    while ((gm = libItemRe.exec(dec)) !== null) {
-      const gKey = gm[1];
-      const gName = cleanSapCellText(gm[2]);
-      // Exclude Teaching Centre / Location / Course / Fee keys (8-digit 0500xxxx, 1000xxxx, 0011xxxx, 9999xxxx)
-      if (/^(?:0500|1000|0011|9999)\d*$/.test(gKey)) continue;
+    const centreOptions = [];
+    const seenCentreKeys = new Set();
+    const libTagRe = /<div[^>]*\bct="LIB_I"[^>]*>/gi;
+    let lm;
+    while ((lm = libTagRe.exec(dec)) !== null) {
+      const tag = lm[0];
+      const km = tag.match(/\bdata-itemkey="(\d{7,10})"/i);
+      const vm = tag.match(/\bdata-itemvalue1="([^"]*)"/i);
+      if (!km || !vm) continue;
+      const gKey = km[1];
+      const gName = cleanSapCellText(vm[1]);
+      if (/^0500\d{3,6}$/.test(gKey) && gName) {
+        if (!seenCentreKeys.has(gKey)) {
+          seenCentreKeys.add(gKey);
+          centreOptions.push({ key: gKey, label: gName });
+        }
+        continue;
+      }
+      // Exclude Location / Course / Fee keys (1000xxxx, 0011xxxx, 9999xxxx)
+      if (/^(?:0500|1000|0011|9999)\d*$/.test(gKey) || gKey.length < 9) continue;
       if (/^(?:EG\s+|YL\s+|AD\s+|IELTS\s+)/i.test(gName) || /Teaching\s+Centre/i.test(gName)) continue;
       if (gKey && !seenGuardianKeys.has(gKey)) {
         seenGuardianKeys.add(gKey);
@@ -657,16 +757,17 @@
       bookingPopupId,
       addReservationItemId,
       addWaitlistItemId,
-      courseInputId: findInputByTitle("Course"),
-      yearInputId: findInputByTitle("Year"),
-      sessionInputId: findInputByTitle("Session"),
-      locationInputId: findInputByTitle("Location"),
-      eventTypeInputId: findInputByTitle("Event type"),
-      academicLevelInputId: findInputByTitle("Academic Level"),
-      classDescInputId: findInputByTitle("Class description"),
+      courseInputId: findSelectOptionInput("Course"),
+      yearInputId: findSelectOptionInput("(?:Academic\\s*)?Year"),
+      sessionInputId: findSelectOptionInput("(?:Academic\\s*)?Session"),
+      locationInputId: findSelectOptionInput("Location"),
+      eventTypeInputId: findSelectOptionInput("Event\\s*type"),
+      academicLevelInputId: findSelectOptionInput("Academic\\s*Level"),
+      classDescInputId: findSelectOptionInput("Class\\s*description"),
       searchBtnId: findBtnByText("Search"),
       scheduleTableId,
       regListTableId,
+      serviceListTableId,
       hasSpacerFragment,
       regRowCount,
       tacCheckboxId,
@@ -677,6 +778,7 @@
       collectorStartInputId,
       collectorEndInputId,
       guardiansList: guardiansList.length > 0 ? guardiansList : null,
+      centreOptions: centreOptions.length > 0 ? centreOptions : null,
     };
 
     const result = includeDefaults ? { ...DEFAULT_REG_CONTROLS } : {};
@@ -768,13 +870,7 @@
     const dec = decodeHtmlEntities(unescaped);
 
     const classes = [];
-    const tblMatch =
-      dec.match(/id="(WD[0-9A-F]+)-mrss-cont/i) ||
-      dec.match(/<table[^>]+id="(WD[0-9A-F]+)"[^>]*ct="ST/i) ||
-      dec.match(/id="(WD[0-9A-F]+)"[^>]+(?:ct="STCS"|data-hint="[^"]*DYNAMIC_TABLE)/i) ||
-      dec.match(/id="(WD[0-9A-F]+)"[^>]*ct="ST"[^>]*V_LIST\.DYNAMIC_TABLE/i) ||
-      dec.match(/<[^>]*V_LIST\.DYNAMIC_TABLE[^>]*\bid="(WD[0-9A-F]+)"/i);
-    const tableId = tblMatch ? tblMatch[1] : "WD0592";
+    const tableId = findVListTableId(dec) || "WD0592";
 
     const rowRegex = /<tr[^>]+rr="(\d+)"[^>]*>([\s\S]*?)<\/tr>/gi;
     let rm;
@@ -1086,13 +1182,13 @@
       else if (/SecPlus B2\.1|\bSB2\.1\b/i.test(cls) || /Secondary Plus B2\.1/i.test(desc)) rawCourse = `${centre.code}-SB2.1`;
       else if (/SecPlus B2\.2|\bSB2\.2\b/i.test(cls) || /Secondary Plus B2\.2/i.test(desc)) rawCourse = `${centre.code}-SB2.2`;
       else if (/SecPlus C1|\bSC1\.1\b/i.test(cls) || /Secondary Plus C1/i.test(desc)) rawCourse = `${centre.code}-SC1.1`;
-      else if (/USA1\b|Upper Secondary Plus A1/i.test(cls) || /Upper Secondary Plus A1/i.test(desc)) rawCourse = `${centre.code}-USA1`;
-      else if (/USA2\b|Upper Secondary Plus A2/i.test(cls) || /Upper Secondary Plus A2/i.test(desc)) rawCourse = `${centre.code}-USA2`;
-      else if (/USB1\.1\b/i.test(cls) || /Upper Secondary Plus B1\.1/i.test(desc)) rawCourse = `${centre.code}-USB1.1`;
-      else if (/USB1\.2\b/i.test(cls) || /Upper Secondary Plus B1\.2/i.test(desc)) rawCourse = `${centre.code}-USB1.2`;
-      else if (/USB2\.1\b/i.test(cls) || /Upper Secondary Plus B2\.1/i.test(desc)) rawCourse = `${centre.code}-USB2.1`;
-      else if (/USB2\.2\b/i.test(cls) || /Upper Secondary Plus B2\.2/i.test(desc)) rawCourse = `${centre.code}-USB2.2`;
-      else if (/USC1\b/i.test(cls) || /Upper Secondary Plus C1/i.test(desc)) rawCourse = `${centre.code}-USC1`;
+      else if (/USA1\b|USecPlus\s*A1|Upper Secondary Plus A1/i.test(cls) || /Upper Secondary Plus A1/i.test(desc)) rawCourse = `${centre.code}-USA1`;
+      else if (/USA2\b|USecPlus\s*A2|Upper Secondary Plus A2/i.test(cls) || /Upper Secondary Plus A2/i.test(desc)) rawCourse = `${centre.code}-USA2`;
+      else if (/USB1\.1\b|USecPlus\s*B1\.1/i.test(cls) || /Upper Secondary Plus B1\.1/i.test(desc)) rawCourse = `${centre.code}-USB1.1`;
+      else if (/USB1\.2\b|USecPlus\s*B1\.2/i.test(cls) || /Upper Secondary Plus B1\.2/i.test(desc)) rawCourse = `${centre.code}-USB1.2`;
+      else if (/USB2\.1\b|USecPlus\s*B2\.1/i.test(cls) || /Upper Secondary Plus B2\.1/i.test(desc)) rawCourse = `${centre.code}-USB2.1`;
+      else if (/USB2\.2\b|USecPlus\s*B2\.2/i.test(cls) || /Upper Secondary Plus B2\.2/i.test(desc)) rawCourse = `${centre.code}-USB2.2`;
+      else if (/USC1\b|USecPlus\s*C1/i.test(cls) || /Upper Secondary Plus C1/i.test(desc)) rawCourse = `${centre.code}-USC1`;
       else if (/AD Beg|Beginner|\bBeg\s+[A-D]\b/i.test(cls) || /Beginner/i.test(desc)) rawCourse = `${centre.code}-AD Beg`;
       else if (/British Council English|\bBCE\b/i.test(cls) || /British Council English/i.test(desc)) rawCourse = `${centre.code}-BCE`;
       else rawCourse = `${centre.code}-BCE`;
@@ -1102,7 +1198,7 @@
     const startDate = dateM ? dateM[1] : (b.start || b.startDate || "");
     const endDate = dateM ? dateM[2] : (b.end || b.endDate || "");
 
-    const yearMatch = String(`${startDate} ${b.session || ""} ${b.className || ""}`).match(/\b(20\d{2})\b/);
+    const yearMatch = String(`${b.session || ""} ${startDate} ${b.className || ""}`).match(/\b(20\d{2})\b/);
     const year = yearMatch ? yearMatch[1] : String(new Date().getFullYear());
 
     const schedInfo = parseClassScheduleInfo(b.className || "", b.session || "");
@@ -1144,6 +1240,47 @@
     return s;
   }
 
+  function formatSapAmount(raw, currency = "") {
+    if (raw === null || raw === undefined) return "";
+    let s = cleanSapCellText(String(raw)).replace(/(?:Amount)\s*$/i, "").trim();
+    if (!s || /^empty$/i.test(s)) return "";
+    let neg = false;
+    if (s.endsWith("-")) {
+      neg = true;
+      s = s.slice(0, -1).trim();
+    } else if (s.startsWith("-")) {
+      neg = true;
+      s = s.slice(1).trim();
+    }
+    const curM = s.match(/\s+([A-Z]{3})$/);
+    if (curM && !currency) {
+      currency = curM[1];
+      s = s.slice(0, curM.index).trim();
+    }
+    if (!/\d/.test(s)) return s;
+
+    let normalized = s.replace(/\s+/g, "");
+    if (/^\d{1,3}(?:\.\d{3})*,\d+$/.test(normalized) || (/,\d{1,2}$/.test(normalized) && !/\.\d{1,2}$/.test(normalized))) {
+      // SAP European decimal format: e.g. 3.850,00 or 250,50 or 0,00
+      normalized = normalized.replace(/\./g, "").replace(",", ".");
+    } else if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(normalized)) {
+      normalized = normalized.replace(/,/g, "");
+    } else {
+      normalized = normalized.replace(/,/g, ".");
+    }
+
+    const num = parseFloat(normalized);
+    if (isNaN(num)) return String(raw);
+    const absNum = Math.abs(num);
+    const hasCents = Math.round(absNum * 100) % 100 !== 0;
+    const fmt = absNum.toLocaleString("en-US", {
+      minimumFractionDigits: hasCents ? 2 : 0,
+      maximumFractionDigits: hasCents ? 2 : 0,
+    });
+    const signed = absNum === 0 ? "0" : (neg ? `-${fmt}` : fmt);
+    return currency ? `${signed} ${currency}` : signed;
+  }
+
   function extractSapNodeValue(el) {
     if (!el) return "";
     if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
@@ -1157,11 +1294,15 @@
       if (aria === "true") return "Yes";
       if (aria === "false") return "No";
     }
-    const innerInp = el.querySelector && el.querySelector("input, textarea");
-    if (innerInp) {
-      if (innerInp.type === "checkbox") return innerInp.checked ? "Yes" : "No";
-      // Even when value is empty, NEVER fall through to hidden accessibility label text inside the wrapper!
-      return stripSapPlaceholderText(innerInp.value || innerInp.getAttribute("value") || "");
+    const innerInputs = el.querySelectorAll ? Array.from(el.querySelectorAll("input, textarea")) : [];
+    if (innerInputs.length > 0) {
+      if (innerInputs.length === 1 && innerInputs[0].type === "checkbox") {
+        return innerInputs[0].checked ? "Yes" : "No";
+      }
+      const vals = innerInputs
+        .map((inp) => (inp.type === "checkbox" ? (inp.checked ? "Yes" : "No") : stripSapPlaceholderText(inp.value || inp.getAttribute("value") || "")))
+        .filter(Boolean);
+      return vals.join(" ");
     }
     // Clone and strip SAP hidden accessibility / screen-reader helper spans before reading textContent
     const clone = el.cloneNode ? el.cloneNode(true) : el;
@@ -1192,119 +1333,228 @@
 
   function parseExistingRegistrationsList(vdomOrHtml) {
     const root = ensureDomRoot(vdomOrHtml);
-    const rows = [];
     let tableId = null;
 
     const allTables = Array.from(root.querySelectorAll("table"));
-    // Locate the Registrations LIST_VIEW table (has headers or LIST_VIEW hints; exclude V_LIST search popup)
+    const isServiceTableHtml = (id, hint, htmlStr, txt) =>
+      /ID_00010020/i.test(hint) ||
+      /ID_00010020|SERVICE_FPM_CE|DISCOUNT_FEE/i.test(htmlStr) ||
+      (/Service\s+description/i.test(txt) && /Discounted\s+fee/i.test(txt));
+
+    const isVListHtml = (id, hint, htmlStr) =>
+      /V_LIST/i.test(id) || /V_LIST/i.test(hint) || /V_LIST\.(?:DYNAMIC_TABLE|E_STEXT_E)/i.test(htmlStr);
+
+    // 1. Collect header columns per table base ID (e.g. WD5A-mrss-hdr-none-content -> WD5A)
+    const headersByBaseId = {};
+    allTables.forEach((tbl) => {
+      const id = tbl.getAttribute("id") || "";
+      const hint = tbl.getAttribute("data-hint") || "";
+      const htmlStr = tbl.innerHTML || "";
+      const txt = tbl.textContent || "";
+      if (isVListHtml(id, hint, htmlStr) || isServiceTableHtml(id, hint, htmlStr, txt)) return;
+      const ths = Array.from(tbl.querySelectorAll('th, [role="columnheader"]'))
+        .map((th) => cleanSapCellText(th.textContent || "").toLowerCase())
+        .filter(Boolean);
+      if (ths.length >= 4 && /booking\s*status|course\/consultation|start\s*date/i.test(ths.join(" "))) {
+        const baseM = id.match(/^(WD[0-9A-F]+)/i);
+        if (baseM) {
+          headersByBaseId[baseM[1]] = ths;
+          if (!tableId) tableId = baseM[1];
+        }
+      }
+    });
+
+    // 2. Collect Registrations LIST_VIEW tables (ID_00010018, SM_SHORT_FPM_CE, EVENT_FPM_CE; strictly exclude V_LIST and Fee table ID_00010020)
     const regTables = [];
     const seenRegTables = new Set();
     const addRegTable = (tbl) => {
       if (!tbl || seenRegTables.has(tbl)) return;
       const id = tbl.getAttribute("id") || "";
       const hint = tbl.getAttribute("data-hint") || "";
-      if (/V_LIST/i.test(id) || /V_LIST/i.test(hint)) return;
+      const htmlStr = tbl.innerHTML || "";
+      const txt = tbl.textContent || "";
+      if (isVListHtml(id, hint, htmlStr) || isServiceTableHtml(id, hint, htmlStr, txt)) return;
       seenRegTables.add(tbl);
       regTables.push(tbl);
     };
+
     allTables.forEach((tbl) => {
       const id = tbl.getAttribute("id") || "";
       const hint = tbl.getAttribute("data-hint") || "";
-      if (/V_LIST/i.test(id) || /V_LIST/i.test(hint)) return;
       const htmlStr = tbl.innerHTML || "";
       const txt = tbl.textContent || "";
-      if (/LIST_VIEW\./i.test(htmlStr) || /Booking\s+Status/i.test(txt) || /Course\/Consultation/i.test(txt)) {
+      if (isVListHtml(id, hint, htmlStr) || isServiceTableHtml(id, hint, htmlStr, txt)) return;
+      if (
+        /ID_00010018/i.test(hint) ||
+        /ID_00010018|SM_SHORT_FPM_CE|EVENT_FPM_CE|SMSTATUS_FPM_CE/i.test(htmlStr) ||
+        /Booking\s+Status/i.test(txt) ||
+        /Course\/Consultation/i.test(txt)
+      ) {
         addRegTable(tbl);
-        if (id.endsWith("-mrss-hdr-none-content")) {
-          const contId = id.replace(/-mrss-hdr-none-content$/, "-mrss-cont-none-content");
-          addRegTable(root.querySelector(`[id="${CSS.escape(contId)}"]`));
+        const baseM = id.match(/^(WD[0-9A-F]+)/i);
+        if (baseM) {
+          const base = baseM[1];
+          addRegTable(root.querySelector(`[id="${CSS.escape(`${base}-mrss-cont-none-content`)}"]`));
+          addRegTable(root.querySelector(`[id="${CSS.escape(`${base}-mrss-cont-left-content`)}"]`));
         }
       }
     });
 
-    // Prefer table rows (<tr rr="k"> or <tr id="...-mrss-cont-none-Row-k">) inside LIST_VIEW tables
-    const trCandidates = [];
+    // 3. Map SapTableCS left-pane selector rows (<tbody hpm="left"> / -mrss-cont-left-Row-k) -> triggerCellId & selected
+    const leftMetaByKey = {};
+    const collectLeftMeta = (scopeRoot) => {
+      Array.from(scopeRoot.querySelectorAll('tr[id*="-mrss-cont-left-Row-"], tbody[hpm="left"] tr[rr]')).forEach((tr) => {
+        const outerHtml = tr.outerHTML || "";
+        if (/V_LIST/i.test(outerHtml)) return;
+        const trId = tr.getAttribute("id") || "";
+        const idTblM = trId.match(/^(WD[0-9A-F]+)/i);
+        const tblId = idTblM ? idTblM[1] : "";
+        const ownsId = (tr.getAttribute("aria-owns") || "").trim();
+        const rrAttr = tr.getAttribute("rr");
+        const idRowM = trId.match(/-mrss-cont-left-Row-(\d+)$/i);
+        const rr = rrAttr !== null ? parseInt(rrAttr, 10) : (idRowM ? parseInt(idRowM[1], 10) + 1 : 0);
+
+        const scCell = tr.querySelector('td[subct="SC"], td[subct="STC"], td[id^="WD"]');
+        const triggerCellId = scCell ? scCell.getAttribute("id") || "" : "";
+        const rowCls = `${tr.getAttribute("class") || ""} ${scCell ? scCell.getAttribute("class") || "" : ""} ${outerHtml}`;
+        const ariaSel = tr.getAttribute("aria-selected") === "true" || (scCell && scCell.getAttribute("aria-selected") === "true");
+        const sstSel = tr.getAttribute("sst") === "2" || (scCell && scCell.getAttribute("sst") === "2");
+        const selIcon = Boolean(
+          tr.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"], .urSTRowSelIcon, .urSTRowSelSecIcon, .urST4LbSelIcon, .lsTblRowSel, .urSTSel')
+        );
+        const selected = Boolean(ariaSel || sstSel || selIcon || /\burSTRowSelIcon\b|\burST4LbSelIcon\b/i.test(rowCls));
+
+        const meta = { triggerCellId, selected, tableId: tblId };
+        if (ownsId) leftMetaByKey[ownsId] = meta;
+        if (tblId && rr > 0) leftMetaByKey[`${tblId}|${rr}`] = meta;
+      });
+    };
+    regTables.forEach(collectLeftMeta);
+
+    // 4. Parse data rows (<tbody hpm="none"> / -mrss-cont-none-Row-k / normal LIST_VIEW rows)
+    const rowsByKey = new Map();
     const seenTr = new Set();
+
     regTables.forEach((tbl) => {
       const tidMatch = (tbl.getAttribute("id") || "").match(/^(WD[0-9A-F]+)/i);
       const tblHintMatch = tidMatch ? tidMatch[1] : null;
-      // Inspect header titles from matching -mrss-hdr table if present
-      const colHeaders = Array.from(tbl.querySelectorAll('th, [role="columnheader"]')).map((th) =>
+      const inlineHeaders = Array.from(tbl.querySelectorAll('th, [role="columnheader"]')).map((th) =>
         cleanSapCellText(th.textContent || "").toLowerCase()
       );
+      const colHeaders = (tblHintMatch && headersByBaseId[tblHintMatch]) || (inlineHeaders.length ? inlineHeaders : []);
+
       Array.from(tbl.querySelectorAll('tr[rr], tr[id*="-mrss-cont-none-Row-"]')).forEach((tr) => {
         if (seenTr.has(tr)) return;
-        const outerHtml = tr.outerHTML || "";
-        if (/V_LIST/i.test(outerHtml)) return;
         seenTr.add(tr);
-        trCandidates.push({ tr, tblHintId: tblHintMatch, colHeaders });
-      });
-    });
+        const trId = tr.getAttribute("id") || "";
+        const outerHtml = tr.outerHTML || "";
+        if (/V_LIST|SERVICE_FPM_CE|ID_00010020/i.test(outerHtml)) return;
+        if (/-mrss-cont-left-Row-/i.test(trId)) return;
+        const parentTbody = tr.parentElement;
+        if (parentTbody && parentTbody.getAttribute("hpm") === "left") return;
 
-    trCandidates.forEach(({ tr, tblHintId, colHeaders }) => {
-      const rrAttr = tr.getAttribute("rr");
-      const idRowM = (tr.getAttribute("id") || "").match(/-mrss-cont-none-Row-(\d+)$/i);
-      const rr = rrAttr !== null ? parseInt(rrAttr, 10) : (idRowM ? parseInt(idRowM[1], 10) + 1 : 0);
-      if (isNaN(rr) || rr < 1) return;
+        const rrAttr = tr.getAttribute("rr");
+        const idRowM = trId.match(/-mrss-cont-none-Row-(\d+)$/i);
+        const rr = rrAttr !== null ? parseInt(rrAttr, 10) : (idRowM ? parseInt(idRowM[1], 10) + 1 : 0);
+        if (isNaN(rr) || rr < 1) return;
 
-      const rowTblMatch = (tr.getAttribute("id") || "").match(/^(WD[0-9A-F]+)/i);
-      const rowTableId = (rowTblMatch && rowTblMatch[1]) || tblHintId || "WDDF";
-      if (!tableId && rowTableId) tableId = rowTableId;
+        const rowTblMatch = trId.match(/^(WD[0-9A-F]+)/i);
+        const rowTableId = (rowTblMatch && rowTblMatch[1]) || tblHintMatch || "WD5A";
+        if (!tableId && rowTableId) tableId = rowTableId;
 
-      const tdEls = Array.from(tr.children).filter((el) => el.tagName === "TD");
-      if (tdEls.length < 4) return;
+        const tdEls = Array.from(tr.children).filter((el) => el.tagName === "TD");
+        if (tdEls.length < 4) return;
 
-      // Map data-hints if present (Row 1 has explicit hints; Row 2+ uses header column positions)
-      const hintVal = (pattern) => {
-        const matchEl = tr.querySelector(`[data-hint*="${pattern}"]`);
-        return matchEl ? extractSapNodeValue(matchEl) : "";
-      };
+        const hintVal = (pattern) => {
+          const matchEl = tr.querySelector(`[data-hint*="${pattern}"]`);
+          return matchEl ? extractSapNodeValue(matchEl) : "";
+        };
 
-      const cellTexts = tdEls.map((td) => extractSapNodeValue(td));
-      const colByHeader = (rx) => {
-        if (!colHeaders || colHeaders.length === 0) return "";
-        const idx = colHeaders.findIndex((h) => rx.test(h));
-        return idx >= 0 && idx < cellTexts.length ? cellTexts[idx] : "";
-      };
-      const nonSelector = cellTexts.filter((t, i) => {
-        const subct = tdEls[i].getAttribute("subct") || "";
-        return subct !== "SC" && !/^yes$|^no$/i.test(t) && t !== "";
-      });
-
-      const dateCells = cellTexts.filter((t) => /^\d{2}\.\d{2}\.\d{4}$/.test(t));
-      const startDate = hintVal("BEGDA") || colByHeader(/start\s*date/i) || dateCells[0] || "";
-      const endDate = hintVal("ENDDA") || colByHeader(/end\s*date/i) || dateCells[1] || dateCells[dateCells.length - 1] || "";
-
-      const courseAndSession = hintVal("SM_") || colByHeader(/course\/consultation|session/i) || nonSelector[0] || "";
-      const className = hintVal("E_STEXT") || colByHeader(/^class$/i) || nonSelector[1] || "";
-      const bookingSource = hintVal("ORIGIN") || colByHeader(/booking\s*source/i) || nonSelector[2] || "";
-      const status = hintVal("STATUS") || colByHeader(/booking\s*status/i) || nonSelector.find((t) => /book|reserv|cancel|wait|complet/i.test(t)) || nonSelector[3] || "";
-      const bookingType = hintVal("BOOKING_TYPE") || colByHeader(/booking\s*type/i) || nonSelector.find((t) => /reserv|wait|definit/i.test(t) && t !== status) || nonSelector[4] || "";
-
-      const scCell = tr.querySelector('td[subct="SC"], td[subct="STC"], td[id^="WD"]');
-      const triggerCellId = scCell ? scCell.getAttribute("id") || "" : "";
-      const rowCls = (tr.getAttribute("class") || "") + " " + (scCell ? scCell.getAttribute("class") || "" : "");
-      const ariaSel = tr.getAttribute("aria-selected") === "true" || (scCell && scCell.getAttribute("aria-selected") === "true");
-      const radioChecked = Boolean(tr.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"], .lsTblRowSel, .urSTSel'));
-      const selected = Boolean(ariaSel || radioChecked || /Sel/i.test(rowCls));
-
-      if (courseAndSession || className || status) {
-        rows.push({
-          rowIndex: rr,
-          tableId: rowTableId,
-          triggerCellId,
-          selected,
-          courseAndSession,
-          className,
-          bookingSource,
-          status,
-          bookingType,
-          startDate,
-          endDate,
+        const cellTexts = tdEls.map((td) => extractSapNodeValue(td));
+        const colByHeader = (rx) => {
+          if (!colHeaders || colHeaders.length === 0) return "";
+          const offset = colHeaders.length > cellTexts.length && tdEls[0] && tdEls[0].getAttribute("subct") !== "SC" ? 1 : 0;
+          const idx = colHeaders.findIndex((h) => rx.test(h));
+          const dataIdx = idx - offset;
+          return dataIdx >= 0 && dataIdx < cellTexts.length ? cellTexts[dataIdx] : "";
+        };
+        const nonSelector = cellTexts.filter((t, i) => {
+          const subct = tdEls[i].getAttribute("subct") || "";
+          return subct !== "SC" && !/^yes$|^no$/i.test(t) && t !== "";
         });
-      }
+
+        const dateCells = cellTexts.filter((t) => /^\d{2}\.\d{2}\.\d{4}$/.test(t));
+        const course = hintVal("SM_SHORT_FPM_CE");
+        const year = hintVal("YEAR_FPM_CE");
+        const period = hintVal("PERIT_FPM_CE");
+        const courseAndSession =
+          [course, year, period].filter(Boolean).join(" ") ||
+          hintVal("SM_") ||
+          colByHeader(/course\/consultation|session/i) ||
+          nonSelector[0] ||
+          "";
+
+        const className = hintVal("EVENT_FPM_CE") || hintVal("E_STEXT") || colByHeader(/^class$/i) || nonSelector[1] || "";
+        const bookingSource = hintVal("ORIGIN_FPM_CE") || hintVal("ORIGIN") || colByHeader(/booking\s*source/i) || nonSelector[2] || "";
+        const status =
+          hintVal("SMSTATUS_FPM_CE") ||
+          hintVal("STATUS") ||
+          colByHeader(/booking\s*status/i) ||
+          nonSelector.find((t) => /book|reserv|cancel|wait|complet/i.test(t)) ||
+          nonSelector[3] ||
+          "";
+        const bookingType =
+          hintVal("BOOKING_TYPE_FPM_CE") ||
+          hintVal("BOOKING_TYPE") ||
+          colByHeader(/booking\s*type/i) ||
+          nonSelector.find((t) => /regular|reserv|wait|definit/i.test(t) && t !== status) ||
+          nonSelector[4] ||
+          "";
+        const startDate = hintVal("BEGDA_FPM_CE") || hintVal("BEGDA") || colByHeader(/start\s*date/i) || dateCells[0] || "";
+        const endDate =
+          hintVal("ENDDA_FPM_CE") || hintVal("ENDDA") || colByHeader(/end\s*date/i) || dateCells[1] || dateCells[dateCells.length - 1] || "";
+
+        const leftMeta = leftMetaByKey[trId] || leftMetaByKey[`${rowTableId}|${rr}`] || null;
+        const scCell = tr.querySelector('td[subct="SC"], td[subct="STC"], td[id^="WD"]');
+        const triggerCellId = (leftMeta && leftMeta.triggerCellId) || (scCell ? scCell.getAttribute("id") || "" : "");
+        const rowCls = (tr.getAttribute("class") || "") + " " + (scCell ? scCell.getAttribute("class") || "" : "");
+        const ariaSel = tr.getAttribute("aria-selected") === "true" || (scCell && scCell.getAttribute("aria-selected") === "true");
+        const radioChecked = Boolean(tr.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"], .lsTblRowSel, .urSTSel'));
+        const selected = Boolean((leftMeta && leftMeta.selected) || ariaSel || radioChecked || /Sel/i.test(rowCls));
+
+        if (courseAndSession || className || status) {
+          const rowObj = {
+            rowIndex: rr,
+            tableId: rowTableId,
+            triggerCellId,
+            selected,
+            course,
+            year,
+            period,
+            courseAndSession,
+            className,
+            bookingSource,
+            status,
+            bookingType,
+            startDate,
+            endDate,
+          };
+          const dedupKey = `${rowTableId}|${rr}`;
+          const prev = rowsByKey.get(dedupKey);
+          const scoreRow = (r) =>
+            (r.courseAndSession ? 1 : 0) +
+            (r.className ? 1 : 0) +
+            (r.status ? 1 : 0) +
+            (r.startDate ? 1 : 0) +
+            (r.triggerCellId ? 1 : 0);
+          if (!prev || scoreRow(rowObj) >= scoreRow(prev)) {
+            rowsByKey.set(dedupKey, rowObj);
+          }
+        }
+      });
     });
 
+    const rows = Array.from(rowsByKey.values()).sort((a, b) => a.rowIndex - b.rowIndex);
     return { tableId, rows };
   }
 
@@ -1312,6 +1562,7 @@
     const root = ensureDomRoot(vdomOrHtml);
     const labelMap = {};
     const changeSequences = { Changed: [], Created: [] };
+    let itemTotalCurrency = "";
 
     const labels = Array.from(root.querySelectorAll('label, [ct="L"]'));
     labels.forEach((lbl) => {
@@ -1327,7 +1578,7 @@
         if (target) val = extractSapNodeValue(target);
       }
 
-      // 2. Fallback or multi-column extraction in same row (e.g. Changed: SELDIN 07.11.2026 13:11:32)
+      // 2. Fallback or multi-column extraction in same row (e.g. Changed: FESSAM 22.11.2026 14:55:19, or Amount + Currency EGP)
       const parentTd = lbl.closest("td");
       const parentTr = lbl.closest("tr");
       if (parentTd && parentTr) {
@@ -1342,6 +1593,10 @@
             if (txt) collected.push(txt);
           }
           if (!val && collected.length > 0) val = collected[0];
+          if (keyLower === "payable amount" || keyLower === "discount amount" || keyLower === "total amount") {
+            const cur = collected.find((c) => /^[A-Z]{3}$/.test(c));
+            if (cur && !itemTotalCurrency) itemTotalCurrency = cur;
+          }
           if (keyLower === "changed" || keyLower === "created") {
             const combined = [];
             if (val) combined.push(val);
@@ -1363,7 +1618,7 @@
       }
     });
 
-    // Extract Course fee and Services table rows (supports both nested and sibling -mrss-hdr/-mrss-cont tables)
+    // Extract Course fee and Services table rows (ID_00010020:LIST_VIEW; supports nested & sibling -mrss-hdr/-mrss-cont tables)
     const services = [];
     const seenServices = new Set();
     const serviceTables = [];
@@ -1377,23 +1632,37 @@
     Array.from(root.querySelectorAll("table")).forEach((tbl) => {
       const txt = tbl.textContent || "";
       const htmlStr = tbl.innerHTML || "";
-      if (!/Service\s+description/i.test(txt) && !/Discounted\s+fee/i.test(txt) && !/DISCOUNT_FEE|PAYABLE_AMT/i.test(htmlStr)) return;
+      const hint = tbl.getAttribute("data-hint") || "";
+      if (
+        !/Service\s+description/i.test(txt) &&
+        !/Discounted\s+fee/i.test(txt) &&
+        !/DISCOUNT_FEE|PAYABLE_AMT|SERVICE_FPM_CE|ID_00010020/i.test(`${hint} ${htmlStr}`)
+      ) {
+        return;
+      }
       addSvcTbl(tbl);
       const id = tbl.getAttribute("id") || "";
-      if (id.endsWith("-mrss-hdr-none-content")) {
-        const contId = id.replace(/-mrss-hdr-none-content$/, "-mrss-cont-none-content");
-        addSvcTbl(root.querySelector(`[id="${CSS.escape(contId)}"]`));
+      const baseM = id.match(/^(WD[0-9A-F]+)/i);
+      if (baseM) {
+        addSvcTbl(root.querySelector(`[id="${CSS.escape(`${baseM[1]}-mrss-cont-none-content`)}"]`));
       }
     });
     serviceTables.forEach((tbl) => {
       Array.from(tbl.querySelectorAll('tr[rr], tr[id*="-mrss-cont-none-Row-"]')).forEach((tr) => {
-        const cells = Array.from(tr.children)
-          .filter((el) => el.tagName === "TD")
-          .map((td) => extractSapNodeValue(td));
+        const trId = tr.getAttribute("id") || "";
+        if (/-mrss-cont-left-Row-/i.test(trId)) return;
+        const parentTbody = tr.parentElement;
+        if (parentTbody && parentTbody.getAttribute("hpm") === "left") return;
+
+        const tdEls = Array.from(tr.children).filter((el) => el.tagName === "TD");
+        const cells = tdEls.map((td) => extractSapNodeValue(td));
         // Expected columns: [selector], Service description, Fee, Discount, Discounted fee, Payable amount, Currency, Sponsored (%), Cancelled
-        const feeIdx = cells.findIndex((c) => /^\d[\d.,]*$/.test(c));
+        const feeIdx = cells.findIndex((c) => /^-?\d[\d.,]*-?$/.test(c));
         if (feeIdx < 0) return;
-        const serviceDescription = feeIdx > 0 ? (cells[feeIdx - 1] && !/^(Yes|No)$/i.test(cells[feeIdx - 1]) ? cells[feeIdx - 1] : "") : "";
+        const svcHintEl = tr.querySelector('[data-hint*="SERVICE_FPM_CE"]');
+        const svcFromHint = svcHintEl ? extractSapNodeValue(svcHintEl) : "";
+        const serviceDescription =
+          svcFromHint || (feeIdx > 0 ? (cells[feeIdx - 1] && !/^(Yes|No)$/i.test(cells[feeIdx - 1]) ? cells[feeIdx - 1] : "") : "");
         const fee = cells[feeIdx] || "";
         const discount = cells[feeIdx + 1] || "";
         const discountedFee = cells[feeIdx + 2] || "";
@@ -1401,7 +1670,8 @@
         const currency = cells[feeIdx + 4] || "";
         const sponsoredPct = cells[feeIdx + 5] || "";
         const cancelled = cells[feeIdx + 6] || "";
-        const k = `${serviceDescription}|${fee}|${payableAmount}|${currency}|${cancelled}`;
+        if (currency && !itemTotalCurrency) itemTotalCurrency = currency;
+        const k = `${serviceDescription}|${fee}|${discount}|${payableAmount}|${currency}|${cancelled}`;
         if (!seenServices.has(k)) {
           seenServices.add(k);
           services.push({
@@ -1443,6 +1713,7 @@
         payableAmount: pick("payable amount"),
         discountAmount: pick("discount amount"),
         totalAmount: pick("total amount"),
+        currency: itemTotalCurrency || (services[0] && services[0].currency) || "EGP",
       },
       paymentOptions: {
         instalmentType: pick("instalment type", "installment type"),
@@ -1469,12 +1740,42 @@
     };
   }
 
+  function extractListViewClassIds(rawXml) {
+    const map = {};
+    if (!rawXml) return map;
+    const unescaped = String(rawXml || "")
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    const dec = decodeHtmlEntities(unescaped);
+
+    // SAP LIST_VIEW.EVENT_FPM_CE stores key ("4":"0011xxxx") and display text ("5":"<className>") inside lsdata
+    const tagRe = /<[^>]*\blsdata='(\{[^']*\})'[^>]*>/gi;
+    let m;
+    while ((m = tagRe.exec(dec)) !== null) {
+      const fullTag = m[0];
+      const ls = m[1];
+      if (!/"4"\s*:\s*"00\d{6}"/i.test(ls) && !/LIST_VIEW\.EVENT_FPM_CE|ZHER_DE_EV_UNIQUE_ID/i.test(fullTag)) {
+        continue;
+      }
+      const keyM = ls.match(/"4"\s*:\s*"(\d{8})"/);
+      const valM = ls.match(/"5"\s*:\s*"([^"]+)"/);
+      if (keyM && valM) {
+        const clsText = cleanSapCellText(valM[1]);
+        if (clsText && !/Teaching\s+Centre/i.test(clsText)) {
+          map[keyM[1]] = clsText;
+        }
+      }
+    }
+    return map;
+  }
+
   Object.assign(global.SAPClient, {
     TEACHING_CENTRES,
     ACADEMIC_LEVEL_KEYS,
     DEFAULT_REG_CONTROLS,
     stepHexId,
     addOneYearToSapDate,
+    formatSapAmount,
     formatClassTime12h,
     formatClassTime24h,
     parseClassScheduleInfo,
@@ -1484,6 +1785,7 @@
     parseSapMessages,
     parseExistingRegistrationsList,
     parseRegistrationDetailsPanel,
+    extractListViewClassIds,
     findRecentCancelledBookings,
     cancelledBookingToClassItem,
     isPrebookedBooking,

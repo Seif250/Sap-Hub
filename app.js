@@ -1733,18 +1733,33 @@
       const cd = (res.details && res.details.courseDetails) || {};
       const ch = (res.details && res.details.changeData) || {};
       const matched = res.matchedRow || {};
+      const regRows = Array.isArray(res.registrations) ? res.registrations : [];
       const actualStart = cd.begin || matched.startDate || "";
       const actualEnd = cd.end || matched.endDate || "";
       const createdDate = (ch.created && ch.created.date) || "";
       const createdTime = (ch.created && ch.created.time) || "";
 
-      if (actualStart || actualEnd || createdDate) {
-        const updatedBookings = (current.bookings || []).map((b) => {
-          const sameRow =
-            b.className === booking.className &&
-            b.session === booking.session &&
-            b.status === booking.status;
-          if (!sameRow) return b;
+      const normClsKey = (s) =>
+        String(s || "")
+          .replace(/(\d{1,2}):(\d{2})\s*(am|pm)/gi, (_, h, m, mer) => {
+            let hr = parseInt(h, 10);
+            if (/pm/i.test(mer) && hr < 12) hr += 12;
+            if (/am/i.test(mer) && hr === 12) hr = 0;
+            return `${String(hr).padStart(2, "0")}:${m}`;
+          })
+          .replace(/\.{2,}$|…$/, "")
+          .replace(/[\s\-_/–—\(\):]+/g, "")
+          .toLowerCase();
+      const begLetter = (s) => String(s || "").match(/\bbeg\s*([a-e])\b/i)?.[1]?.toLowerCase() || "";
+
+      let changed = false;
+      const updatedBookings = (current.bookings || []).map((b) => {
+        const isClickedRow =
+          b.className === booking.className &&
+          b.session === booking.session &&
+          b.status === booking.status;
+        if (isClickedRow && (actualStart || actualEnd || createdDate)) {
+          changed = true;
           return {
             ...b,
             actualStartDate: actualStart || b.actualStartDate,
@@ -1752,13 +1767,69 @@
             bookingDate: b.bookingDate || createdDate || b.bookingDate,
             bookingTime: b.bookingTime || createdTime || b.bookingTime,
           };
-        });
+        }
+        // Backfill ALL matching active rows returned in SAP LIST_VIEW in the same pass
+        if (regRows.length > 0 && b.className) {
+          const bKey = normClsKey(b.className);
+          const bBeg = begLetter(b.className);
+          const bSt = String(b.status || "").toLowerCase();
+          const rowHit = regRows.find((r) => {
+            const rKey = normClsKey(r.className);
+            if (!rKey || !bKey) return false;
+            const rBeg = begLetter(r.className);
+            if (bBeg && rBeg && bBeg !== rBeg) return false;
+            const clsOk = bKey.startsWith(rKey) || rKey.startsWith(bKey);
+            const stOk = !bSt || !r.status || r.status.toLowerCase() === bSt;
+            return clsOk && stOk;
+          });
+          if (rowHit && (rowHit.startDate || rowHit.endDate)) {
+            if (b.actualStartDate !== rowHit.startDate || b.actualEndDate !== rowHit.endDate) {
+              changed = true;
+              return {
+                ...b,
+                actualStartDate: rowHit.startDate || b.actualStartDate,
+                actualEndDate: rowHit.endDate || b.actualEndDate,
+              };
+            }
+          }
+        }
+        return b;
+      });
+
+      if (changed) {
         const updatedCurr = { ...current, bookings: updatedBookings };
         setCurrent((curr) =>
           curr && curr.profile && String(curr.profile.studentId || "").padStart(10, "0") === sId ? updatedCurr : curr
         );
         setCache((prev) => ({ ...prev, [sId]: updatedCurr }));
       }
+    }
+
+    function handleSelectRegistrationRow(row) {
+      if (!row || !current) return;
+      const norm = (s) =>
+        String(s || "").replace(/\.{2,}$|…$/, "").replace(/[\s\-_/–—\(\):]+/g, "").toLowerCase();
+      const rKey = norm(row.className);
+      const rBeg = String(row.className || "").match(/\bbeg\s*([a-e])\b/i)?.[1]?.toLowerCase() || "";
+      const match = (current.bookings || []).find((b) => {
+        const bKey = norm(b.className);
+        const bBeg = String(b.className || "").match(/\bbeg\s*([a-e])\b/i)?.[1]?.toLowerCase() || "";
+        if (bBeg && rBeg && bBeg !== rBeg) return false;
+        return rKey && bKey && (bKey.startsWith(rKey) || rKey.startsWith(bKey)) &&
+          (!row.status || !b.status || b.status.toLowerCase() === row.status.toLowerCase());
+      });
+      setSelectedBookingDetail(
+        match || {
+          courseCode: row.course || "",
+          courseDescription: row.courseAndSession || row.className || "",
+          className: row.className || "",
+          session: row.courseAndSession || "",
+          bookingSource: row.bookingSource || "",
+          status: row.status || "",
+          actualStartDate: row.startDate || "",
+          actualEndDate: row.endDate || "",
+        }
+      );
     }
 
     const ctx = { query, setQuery, runSearch, clear, loading, step, error, setError, results, current, model, pricing, inputRef, cache,
@@ -1785,6 +1856,7 @@
         studentName=${SAPC.formatStudentName(current.profile.fullName)}
         cachedResult=${regDetailsCache[getRegDetailKey(current.profile.studentId, selectedBookingDetail)] || null}
         onDetailsLoaded=${(res) => handleBookingDetailsLoaded(selectedBookingDetail, res)}
+        onSelectRow=${handleSelectRegistrationRow}
         onRebook=${handleRebookCancelled}
         onClose=${() => setSelectedBookingDetail(null)}
       />`}

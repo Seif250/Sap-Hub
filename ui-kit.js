@@ -137,6 +137,19 @@
     }
 
     const isConsult = /ylcon|adcon|consultation|placement|assessment/i.test(`${b.courseCode} ${b.courseDescription} ${b.className}`);
+    const isAnnualPeriod = /annual\s+session/i.test(sessionName);
+    if (isAnnualPeriod) {
+      // AD Annual Session spans ~11 months (Sep -> Aug) and is NOT a 4-week Beginner class's actual start/end dates
+      return {
+        start: periodStart,
+        end: periodEnd,
+        periodStart,
+        periodEnd,
+        sessionName,
+        isAdjustedToClassDay: false,
+        isAnnualPeriod: true,
+      };
+    }
     const aligned = alignDatesToClassDays(periodStart, periodEnd, b.className, isConsult);
     return {
       start: aligned.start,
@@ -145,6 +158,7 @@
       periodEnd,
       sessionName,
       isAdjustedToClassDay: aligned.adjusted,
+      isAnnualPeriod: false,
     };
   }
   function bookingStatusTone(status) {

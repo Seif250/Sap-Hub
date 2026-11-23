@@ -611,6 +611,8 @@
       SAP.applySapDeltaUpdates(d.body, vdom);
       const det = SAP.parseStudentDetailScreen(vdom, d.body);
       sess.backToSearchBtn = (det.menuIds && det.menuIds.backToSearchBtn) || sess.backToSearchBtn;
+      sess.registrationBtn = (det.menuIds && det.menuIds.registrationBtn) || sess.registrationBtn;
+      sess.currentStudentId = studentId;
       sess.screen = "DETAIL";
 
       let notesData = { notesList: [], rawNotesList: [], detectedLevel: null };
@@ -904,6 +906,8 @@
                   SAP.applySapDeltaUpdates(d2.body, vdom);
                   const det2 = SAP.parseStudentDetailScreen(vdom, d2.body);
                   sess.backToSearchBtn = (det2.menuIds && det2.menuIds.backToSearchBtn) || sess.backToSearchBtn;
+                  sess.registrationBtn = (det2.menuIds && det2.menuIds.registrationBtn) || sess.registrationBtn;
+                  sess.currentStudentId = studentId;
                   sess.screen = "DETAIL";
                   const m2 = det2.menuIds || {};
                   h = await proxy({
@@ -1001,6 +1005,7 @@
       connect,
       runSearch,
       vdom,
+      getSession: () => session,
       clearSession: () => { session = null; },
     },
   };

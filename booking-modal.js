@@ -324,6 +324,8 @@
       if (!studentId || loading) return;
       setMode("single");
       setSelectedCentreKey(targetCentreKey);
+      setClassesList([]);
+      setSelectedTerms([]);
       setLoading(true);
       setErrorMsg("");
       setBookingResult(null);
@@ -438,7 +440,10 @@
         setBookingResult({
           ok: res.ok,
           bookingAction,
-          className: firstCls.className,
+          className: (res.failedClassItem && res.failedClassItem.className) || (res.classItem && res.classItem.className) || firstCls.className,
+          failedClassItem: res.failedClassItem || (res.ok ? null : (res.classItem || null)),
+          failedSapObjectId: res.failedSapObjectId || "",
+          sapClassIdMap: res.sapClassIdMap || {},
           bookedClasses: bookedItems.length > 0 ? bookedItems : items,
           centreName: cleanName(cObj && cObj.shortName),
           messages: res.messages || [],
@@ -447,6 +452,9 @@
         setBookingResult({
           ok: false,
           className: firstCls.className,
+          failedClassItem: items.length === 1 ? items[0] : null,
+          failedSapObjectId: "",
+          sapClassIdMap: {},
           bookedClasses: items,
           centreName: cleanName(cObj && cObj.shortName),
           messages: [{ type: "ERROR", text: err.message || "Booking failed in SAP." }],
@@ -477,6 +485,34 @@
       if (c && c.termText) return c.termText;
       const tn = getTermNum(c);
       return tn < 900 ? `T${tn}` : "";
+    };
+
+    const resolveAffectedClassForResult = (resObj) => {
+      if (!resObj || resObj.ok) return null;
+      const allMsgsTxt = (resObj.messages || []).map((m) => m.text || "").join(" ");
+      const idM = allMsgsTxt.match(/\b(00\d{6}|\d{8})\b/);
+      const sapId = (idM && idM[1]) || resObj.failedSapObjectId || "";
+      const candidates = resObj.bookedClasses || [];
+      const idMap = resObj.sapClassIdMap || {};
+      if (sapId && idMap[sapId]) {
+        const mappedCls = idMap[sapId];
+        const hit = candidates.find((c) => c.className === mappedCls ||
+          String(c.className || "").toLowerCase().includes(mappedCls.toLowerCase()) ||
+          mappedCls.toLowerCase().includes(String(c.className || "").toLowerCase()));
+        return { sapId, item: hit || { className: mappedCls } };
+      }
+      const qM = allMsgsTxt.match(/Target class "([^"]+)"/i);
+      if (qM) {
+        const hit = candidates.find((c) => c.className === qM[1]);
+        if (hit) return { sapId, item: hit };
+      }
+      if (resObj.failedClassItem) {
+        return { sapId, item: resObj.failedClassItem };
+      }
+      if (candidates.length === 1) {
+        return { sapId, item: candidates[0] };
+      }
+      return sapId ? { sapId, item: null } : null;
     };
 
     // Dynamic term list (at least up to Term 11, or max found in data)
@@ -939,6 +975,18 @@
                       <span className=${`pill !text-[10px] !py-0 ${m.type === "ERROR" ? "pill-red" : m.type === "WARNING" ? "pill-amber" : "pill-green"}`}>${m.type}</span>
                       <span className="select-text">${m.text}</span></div>`)}
                   </div>`}
+                  ${(() => {
+                    const aff = resolveAffectedClassForResult(bookingResult);
+                    if (!aff || !aff.item) return null;
+                    return html`<div className="mt-2 p-2 rounded-[7px] bg-white/90 border border-red-200 flex items-center justify-between gap-2 flex-wrap text-[11.5px]">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-bold text-red-700 shrink-0">${aff.sapId ? `Class ID ${aff.sapId}:` : "Affected Class:"}</span>
+                        ${getTermText(aff.item) && html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${getTermText(aff.item)}</span>`}
+                        <b className="text-slate-900 truncate">${fmtClass(aff.item)}</b>
+                      </div>
+                      ${aff.item.startDate && html`<span className="num text-slate-600 font-mono text-[11px]">${fmtDate(aff.item.startDate)}${aff.item.endDate ? ` → ${fmtDate(aff.item.endDate)}` : ""}</span>`}
+                    </div>`;
+                  })()}
                 </div>`}
 
               <div className="flex-1 min-h-0 overflow-auto scroll-thin">
@@ -1228,9 +1276,12 @@
         </div>
       `}
 
-      ${bookingResult && !bookingResult.ok && html`
+      ${bookingResult && !bookingResult.ok && (() => {
+        const aff = resolveAffectedClassForResult(bookingResult);
+        const canRemoveFromCart = aff && aff.item && cartClasses.length > 1 && isInCart(aff.item);
+        return html`
         <div className="fixed inset-0 z-[70] grid place-items-center" style=${{ background: "rgba(15,23,42,0.55)", backdropFilter: "blur(2px)" }}>
-          <div className="bg-white rounded-[16px] shadow-2xl p-6 w-[520px] max-w-[95vw] space-y-4 border border-red-200 modal-pop">
+          <div className="bg-white rounded-[16px] shadow-2xl p-6 w-[540px] max-w-[95vw] space-y-4 border border-red-200 modal-pop">
             <div className="flex items-start gap-3.5">
               <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 grid place-items-center shrink-0 shadow-inner">
                 <${Icon} name="alert" size=${24} />
@@ -1251,6 +1302,26 @@
               </button>
             </div>
 
+            ${aff && aff.item && html`
+              <div className="p-3 rounded-[10px] bg-amber-50/90 border border-amber-300 space-y-1 text-[12px]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10.5px] font-bold uppercase tracking-wider text-amber-900">
+                    ${aff.sapId ? `Target Class (SAP ID ${aff.sapId})` : "Class That Caused This Error"}
+                  </span>
+                  ${aff.item._centreName && html`<span className="pill pill-blue !text-[10px] font-semibold">${aff.item._centreName}</span>`}
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                  ${getTermText(aff.item) && html`<span className="pill pill-amber font-mono !text-[10px] !py-0 !px-1.5 font-bold">${getTermText(aff.item)}</span>`}
+                  <span className="font-bold text-[13px] text-slate-900 select-text">${fmtClass(aff.item)}</span>
+                </div>
+                ${aff.item.startDate && html`
+                  <div className="text-[11px] font-mono text-slate-600 num">
+                    ${fmtDate(aff.item.startDate)}${aff.item.endDate ? ` → ${fmtDate(aff.item.endDate)}` : ""}
+                  </div>
+                `}
+              </div>
+            `}
+
             <div className="p-3 rounded-[10px] bg-red-50 border border-red-200 text-[12px] space-y-2">
               <div className="font-semibold text-red-950">Messages from SAP:</div>
               ${bookingResult.messages.map((m, mi) => html`
@@ -1261,7 +1332,20 @@
               `)}
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 flex-wrap">
+              ${canRemoveFromCart && html`
+                <button
+                  type="button"
+                  className="btn !h-8 !px-3 text-[12px] font-semibold !bg-red-50 hover:!bg-red-100 !text-red-800 !border-red-300"
+                  onClick=${() => {
+                    removeFromCart(aff.item);
+                    setBookingResult(null);
+                  }}
+                >
+                  <${Icon} name="x" size=${13} />
+                  <span>Remove Failed Class from Cart</span>
+                </button>
+              `}
               <button
                 type="button"
                 className="btn btn-primary !h-8 !px-4 text-[12px] font-bold"
@@ -1271,8 +1355,8 @@
               </button>
             </div>
           </div>
-        </div>
-      `}
+        </div>`;
+      })()}
     </div>`;
   }
 

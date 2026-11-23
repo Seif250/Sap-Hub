@@ -14,6 +14,7 @@
     connect,
     runSearch,
     vdom,
+    getSession,
     clearSession,
   } = global.SapService._internal;
   // ==========================================================================
@@ -25,6 +26,62 @@
 
   let regSession = null; // { studentId, regUrl, contextUrl, secureId, cookie, centreKey, controls, popupOpen }
   let lastGuardiansByStudent = {};
+
+  /**
+   * Extracts total row count (crc / aria-rowcount / iContentRowCount) specifically for the
+   * popup schedule table (V_LIST), ignoring background LIST_VIEW row counts.
+   */
+  function extractScheduleRowCount(xmlBody, scheduleTableId) {
+    if (!xmlBody) return null;
+    if (scheduleTableId) {
+      const escId = scheduleTableId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const mId =
+        xmlBody.match(new RegExp(`id="${escId}"[^>]*\\bcrc="(\\d+)"`, "i")) ||
+        xmlBody.match(new RegExp(`\\bcrc="(\\d+)"[^>]*id="${escId}"`, "i"));
+      if (mId) return parseInt(mId[1], 10);
+    }
+    const vListM =
+      xmlBody.match(/V_LIST\.DYNAMIC_TABLE[^>]*\bcrc="(\d+)"/i) ||
+      xmlBody.match(/\bcrc="(\d+)"[^>]*V_LIST\.DYNAMIC_TABLE/i);
+    if (vListM) return parseInt(vListM[1], 10);
+
+    const crcRe = /<table\b[^>]*\bcrc="(\d+)"[^>]*>/gi;
+    let m;
+    while ((m = crcRe.exec(xmlBody)) !== null) {
+      if (!/LIST_VIEW\.(?:DYNAMIC_TABLE|TAC_FPM_CE)/i.test(m[0])) {
+        return parseInt(m[1], 10);
+      }
+    }
+    const fallbackM =
+      xmlBody.match(/aria-rowcount="(\d+)"/i) ||
+      xmlBody.match(/iContentRowCount="(\d+)"/i) ||
+      xmlBody.match(/data-itemcount="(\d+)"/i);
+    return fallbackM ? parseInt(fallbackM[1], 10) : null;
+  }
+
+  function buildPopupSearchEvents(ctl, { courseCode = "", year = "", classDesc = undefined } = {}) {
+    const events = [];
+    if (ctl.courseInputId && courseCode) {
+      events.push(
+        `ComboBox_Change~E002Id~E004${ctl.courseInputId}~E005Value~E004${SAP.sapEscape(courseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+      );
+    }
+    if (ctl.yearInputId && year) {
+      events.push(
+        `ComboBox_Change~E002Id~E004${ctl.yearInputId}~E005Value~E004${SAP.sapEscape(year)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+      );
+    }
+    if (ctl.classDescInputId && classDesc !== undefined) {
+      events.push(
+        `ComboBox_Change~E002Id~E004${ctl.classDescInputId}~E005Value~E004${SAP.sapEscape(classDesc)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+      );
+    }
+    events.push(
+      `Button_Press~E002Id~E004${ctl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
+      `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
+    );
+    return events;
+  }
 
   /**
    * Releases any open ZHER_WA_REGISTRATION session by closing WDWL1 (if open) and pressing Back (WD028A / WD02DE)
@@ -86,6 +143,63 @@
   async function obtainStudentRegistrationUrl(studentId, onStep) {
     return withSapLock(async () => {
       const cleanId = String(studentId || "").padStart(10, "0");
+
+      // Fast path: reuse currently open student DETAIL or HISTORY session (~2-3s faster!)
+      const curSess = getSession && getSession();
+      if (
+        curSess &&
+        curSess.contextUrl &&
+        curSess.secureId &&
+        curSess.currentStudentId === cleanId &&
+        (curSess.screen === "DETAIL" || curSess.screen === "HISTORY")
+      ) {
+        try {
+          let activeSess = curSess;
+          if (activeSess.screen === "HISTORY" && activeSess.backFromHistoryBtn) {
+            onStep && onStep("Returning to SAP Student Detail…");
+            const bhRes = await proxy({
+              url: activeSess.contextUrl,
+              method: "POST",
+              cookie: activeSess.cookie,
+              body: postBody(activeSess.secureId, SAP.buildButtonPressQueue(activeSess.backFromHistoryBtn)),
+            });
+            if (bhRes.ok && bhRes.body && !bhRes.body.includes("SAMLRequest") && bhRes.sessionState !== "RELEASED") {
+              activeSess.cookie = SAP.mergeCookies(activeSess.cookie, bhRes.setCookie);
+              SAP.applySapDeltaUpdates(bhRes.body, vdom);
+              const detFast = SAP.parseStudentDetailScreen(vdom, bhRes.body);
+              activeSess.registrationBtn = (detFast.menuIds && detFast.menuIds.registrationBtn) || activeSess.registrationBtn;
+              activeSess.backToSearchBtn = (detFast.menuIds && detFast.menuIds.backToSearchBtn) || activeSess.backToSearchBtn;
+              activeSess.screen = "DETAIL";
+            } else {
+              activeSess = null;
+            }
+          }
+          if (activeSess && activeSess.screen === "DETAIL" && activeSess.registrationBtn) {
+            onStep && onStep("Opening SAP Registration portal…");
+            const fastRegClick = await proxy({
+              url: activeSess.contextUrl,
+              method: "POST",
+              cookie: activeSess.cookie,
+              body: postBody(activeSess.secureId, SAP.buildButtonPressQueue(activeSess.registrationBtn)),
+            });
+            if (fastRegClick.ok && fastRegClick.body && !fastRegClick.body.includes("SAMLRequest") && fastRegClick.sessionState !== "RELEASED") {
+              const fastUnesc = String(fastRegClick.body)
+                .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+              const fastUrlM = fastUnesc.match(/"url"\s*:\s*"([^"]+)"/i);
+              if (fastUrlM) {
+                clearSession();
+                let redirectUrl = fastUrlM[1];
+                if (redirectUrl.startsWith("/")) redirectUrl = `${SAP.SAP_ORIGIN}${redirectUrl}`;
+                return { redirectUrl, cookie: SAP.mergeCookies(activeSess.cookie, fastRegClick.setCookie) };
+              }
+            }
+          }
+        } catch (fastErr) {
+          // Fall through cleanly to standard search flow
+        }
+      }
+
       let sess = await ensureSearchScreen(onStep);
       onStep && onStep(`Locating ${cleanId} in SAP for registration…`);
       const crit = [{ label: "Student ID", controlId: sess.controls.studentId, value: cleanId }];
@@ -359,7 +473,11 @@
           throw new Error("Popup did not open");
         }
         cookie = SAP.mergeCookies(cookie, popRes.setCookie);
-        ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(popRes.body));
+        const popCtl = SAP.parseRegistrationControls(popRes.body);
+        if (!popCtl.searchBtnId && !popCtl.courseInputId && !popCtl.classDescInputId) {
+          throw new Error("Popup controls did not refresh");
+        }
+        ctl = mergeRegControls(ctl, popCtl);
         regSession = {
           ...rs,
           cookie,
@@ -392,53 +510,55 @@
     onStep,
   }) {
     const cleanId = String(studentId || "").padStart(10, "0");
+    const hadSessionBefore = Boolean(regSession);
     let rs = await ensureRegistrationPopup({ studentId: cleanId, centreKey, bookingAction, isAdult, onStep });
 
-    const ctl = rs.controls;
+    const buildSearchQueueFor = (c) => {
+      const evs = [];
+      if (c.courseInputId) {
+        evs.push(
+          `ComboBox_Change~E002Id~E004${c.courseInputId}~E005Value~E004${SAP.sapEscape(courseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+        );
+      }
+      if (c.yearInputId) {
+        evs.push(
+          `ComboBox_Change~E002Id~E004${c.yearInputId}~E005Value~E004${SAP.sapEscape(year || "2026")}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+        );
+      }
+      if (c.eventTypeInputId && eventType && !/^(New\s*)?\d{1,2}L/i.test(eventType)) {
+        evs.push(
+          `ComboBox_Change~E002Id~E004${c.eventTypeInputId}~E005Value~E004${SAP.sapEscape(eventType)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+        );
+      }
+      if (c.classDescInputId) {
+        const descVal = subLevelFilter ? `*${subLevelFilter}*` : "";
+        evs.push(
+          `ComboBox_Change~E002Id~E004${c.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
+        );
+      }
+      evs.push(
+        `Button_Press~E002Id~E004${c.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
+        `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
+      );
+      return evs.join("~E001");
+    };
+
     onStep && onStep(`Searching SAP classes for ${courseCode || "selected course"} (${year})…`);
-
-    const events = [];
-    if (ctl.courseInputId) {
-      events.push(
-        `ComboBox_Change~E002Id~E004${ctl.courseInputId}~E005Value~E004${SAP.sapEscape(courseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-      );
-    }
-    if (ctl.yearInputId) {
-      events.push(
-        `ComboBox_Change~E002Id~E004${ctl.yearInputId}~E005Value~E004${SAP.sapEscape(year || "2026")}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-      );
-    }
-    if (ctl.eventTypeInputId && eventType && !/^(New\s*)?\d{1,2}L/i.test(eventType)) {
-      events.push(
-        `ComboBox_Change~E002Id~E004${ctl.eventTypeInputId}~E005Value~E004${SAP.sapEscape(eventType)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-      );
-    }
-    if (ctl.classDescInputId) {
-      const descVal = subLevelFilter ? `*${subLevelFilter}*` : "";
-      events.push(
-        `ComboBox_Change~E002Id~E004${ctl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-      );
-    }
-
-    events.push(
-      `Button_Press~E002Id~E004${ctl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
-      `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
-    );
 
     let sRes = await proxy({
       url: rs.contextUrl,
       method: "POST",
       cookie: rs.cookie,
-      body: postRegBody(rs.secureId, events.join("~E001")),
+      body: postRegBody(rs.secureId, buildSearchQueueFor(rs.controls)),
     });
 
-    if (!sRes.ok || !sRes.body || sRes.body.includes("SAMLRequest") || sRes.sessionState === "RELEASED") {
-      rs = await initRegistrationPopup({ studentId: cleanId, centreKey, bookingAction, onStep });
+    if (!sRes.ok || !sRes.body || sRes.body.includes("SAMLRequest") || sRes.sessionState === "RELEASED" || /id="WDWL2"/i.test(sRes.body)) {
+      rs = await initRegistrationPopup({ studentId: cleanId, centreKey, bookingAction, isAdult, onStep });
       sRes = await proxy({
         url: rs.contextUrl,
         method: "POST",
         cookie: rs.cookie,
-        body: postRegBody(rs.secureId, events.join("~E001")),
+        body: postRegBody(rs.secureId, buildSearchQueueFor(rs.controls)),
       });
     }
 
@@ -446,18 +566,43 @@
     rs.cookie = SAP.mergeCookies(rs.cookie, sRes.setCookie);
     rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(sRes.body));
 
-    const allClasses = SAP.parseRegistrationClasses(sRes.body).map((c) => ({ ...c, firstVisibleIndex: 0 }));
+    let parsedInitial = SAP.parseRegistrationClasses(sRes.body);
+    // Branch-mismatch guard: if cached session returned classes for a different branch (e.g. CTS instead of AGU), re-init fresh
+    const expectedPrefix = (courseCode && courseCode.split("-")[0] || "").trim().toUpperCase();
+    const hasBranchMismatch =
+      hadSessionBefore &&
+      parsedInitial.length > 0 &&
+      expectedPrefix &&
+      /^(AGU|CTS|OCT|HEL|AIS|ALX|KLS)$/i.test(expectedPrefix) &&
+      parsedInitial.every((c) => {
+        const cls = String(c.className || "").toUpperCase();
+        const altPrefix = expectedPrefix === "AIS" ? "NCA" : expectedPrefix === "ALX" ? "BSA" : expectedPrefix;
+        return /^(AGU|CTS|OCT|HEL|AIS|NCA|ALX|BSA|KLS)\b/.test(cls) &&
+          !cls.startsWith(expectedPrefix) &&
+          !cls.startsWith(altPrefix);
+      });
+
+    if (hasBranchMismatch) {
+      onStep && onStep(`Refreshing SAP search session for ${expectedPrefix}…`);
+      rs = await initRegistrationPopup({ studentId: cleanId, centreKey, bookingAction, isAdult, onStep });
+      sRes = await proxy({
+        url: rs.contextUrl,
+        method: "POST",
+        cookie: rs.cookie,
+        body: postRegBody(rs.secureId, buildSearchQueueFor(rs.controls)),
+      });
+      if (!sRes.ok || !sRes.body) throw new Error("Failed to search classes in SAP.");
+      rs.cookie = SAP.mergeCookies(rs.cookie, sRes.setCookie);
+      rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(sRes.body));
+      parsedInitial = SAP.parseRegistrationClasses(sRes.body);
+    }
+
+    const allClasses = parsedInitial.map((c) => ({ ...c, firstVisibleIndex: 0 }));
     const messages = SAP.parseSapMessages(sRes.body);
 
     // Accurately detect total row count from SAP Web Dynpro table (crc attribute e.g. crc="71")
-    const crcMatch =
-      (rs.controls.scheduleTableId ? sRes.body.match(new RegExp(`id="${rs.controls.scheduleTableId}"[^>]*crc="(\\d+)"`, "i")) : null) ||
-      sRes.body.match(/id="(?:WD[0-9A-F]+)"[^>]+(?:ct="STCS"|ct="ST5"|ct="ST")[^>]*\scrc="(\d+)"/i) ||
-      sRes.body.match(/crc="(\d+)"/i) ||
-      sRes.body.match(/aria-rowcount="(\d+)"/i) ||
-      sRes.body.match(/iContentRowCount="(\d+)"/i) ||
-      sRes.body.match(/data-itemcount="(\d+)"/i);
-    const totalRowCount = crcMatch ? parseInt(crcMatch[1], 10) : 0;
+    const parsedTotalCount = extractScheduleRowCount(sRes.body, rs.controls.scheduleTableId);
+    const totalRowCount = parsedTotalCount !== null ? parsedTotalCount : 0;
     const maxTarget = totalRowCount > 0 ? totalRowCount : 150;
 
     let didScroll = false;
@@ -707,6 +852,41 @@
     let primaryCentreKey = deduceCentreKeyFromClassOrBranch(firstItem.className, firstItem._centreKey || centreKey);
     const primaryCourseCode = firstItem._courseCode || courseCode;
     let rs = regSession;
+    const sapClassIdMap = {};
+    const recordClassIdsFromXml = (xml, hintItem = null) => {
+      if (!xml || !SAP.extractListViewClassIds) return;
+      const found = SAP.extractListViewClassIds(xml);
+      const beforeKeys = Object.keys(sapClassIdMap);
+      Object.entries(found).forEach(([id, clsName]) => {
+        sapClassIdMap[id] = clsName;
+      });
+      if (hintItem && hintItem.className) {
+        const newlyAdded = Object.keys(found).filter((id) => !beforeKeys.includes(id));
+        if (newlyAdded.length === 1 && !sapClassIdMap[newlyAdded[0]]) {
+          sapClassIdMap[newlyAdded[0]] = hintItem.className;
+        }
+      }
+    };
+    const resolveFailedItem = (msgs) => {
+      const text = (msgs || []).map((m) => m.text || "").join(" ");
+      const idMatches = Array.from(text.matchAll(/\b(00\d{6}|\d{8})\b/g)).map((m) => m[1]);
+      for (const sapId of idMatches) {
+        const mappedName = sapClassIdMap[sapId];
+        if (mappedName) {
+          const hit = itemsToBook.find((it) => it.className === mappedName ||
+            String(it.className || "").toLowerCase().includes(mappedName.toLowerCase()) ||
+            mappedName.toLowerCase().includes(String(it.className || "").toLowerCase()));
+          if (hit) return { sapId, item: hit };
+          return { sapId, item: { className: mappedName, _sapObjectId: sapId } };
+        }
+      }
+      const quotedM = text.match(/Target class "([^"]+)"/i);
+      if (quotedM) {
+        const hit = itemsToBook.find((it) => it.className === quotedM[1]);
+        if (hit) return { sapId: "", item: hit };
+      }
+      return itemsToBook.length === 1 ? { sapId: idMatches[0] || "", item: itemsToBook[0] } : null;
+    };
 
     try {
       // Ensure we have an open Registration session for the student & branch of the first class
@@ -794,10 +974,12 @@
           }
         }
 
-        // 2. Determine exact year for this specific item from its start date!
+        // 2. Determine exact SAP Academic Year (PERYR_E) for this item!
+        // IMPORTANT: In SAP, YL T2/T3/T4/Summer classes running in Jan–Aug 2027 belong to Academic Year "2026".
+        // Therefore item.year (PERYR_E returned by SAP) MUST take priority over the calendar year inside startDate!
         const itemStartDateYear = (item.startDate && item.startDate.match(/\b(20\d{2})\b/)?.[1])
           || (item.start && item.start.match(/\b(20\d{2})\b/)?.[1]);
-        const itemYear = itemStartDateYear || item.year || year || "2026";
+        const itemYear = item.year || year || itemStartDateYear || "2026";
 
         // For 2nd+ classes (or if popup is closed), click "Add reservation" / "Add waitlist booking" to open WDWL1 popup
         if (idx > 0 || !rs.popupOpen) {
@@ -854,45 +1036,26 @@
           rs.popupOpen = true;
         }
 
-        // Filter open popup by smart class hint (e.g. *Sep26*, *Jan26*, *Beg B*, *T1*) so target class is at rowIndex=1
+        // Filter open popup by smart class hint (e.g. *Sep26*, *Jan26*, *Beg C*) and search SAP
         const curCtl = rs.controls;
         onStep && onStep(
           itemsToBook.length > 1
             ? `Locating & adding class ${idx + 1} of ${itemsToBook.length}: "${item.className}"…`
             : `Selecting class "${item.className}" & adding to registration…`
         );
-        const searchEvents = [];
-        if (curCtl.courseInputId && itemCourseCode) {
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.courseInputId}~E005Value~E004${SAP.sapEscape(itemCourseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
+        let descVal = "";
+        const hint = extractClassSearchHint(item.className);
+        if (hint) {
+          descVal = `*${hint}*`;
+        } else if (item.subLevelFilter && !/^(?:T\d+|Sat|Sun|Mon|Tue|Wed|Thu|Fri)/i.test(item.subLevelFilter)) {
+          descVal = `*${item.subLevelFilter}*`;
         }
-        if (curCtl.yearInputId) {
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.yearInputId}~E005Value~E004${SAP.sapEscape(itemYear)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
-        }
-        if (curCtl.eventTypeInputId && item.eventType && !/^(?:New\s*)?\d{1,2}L/i.test(item.eventType)) {
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.eventTypeInputId}~E005Value~E004${SAP.sapEscape(item.eventType)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
-        }
-        if (curCtl.classDescInputId) {
-          let descVal = "";
-          const hint = extractClassSearchHint(item.className);
-          if (hint) {
-            descVal = `*${hint}*`;
-          } else if (item.subLevelFilter && !/^(?:T\d+|Sat|Sun|Mon|Tue|Wed|Thu|Fri)/i.test(item.subLevelFilter)) {
-            descVal = `*${item.subLevelFilter}*`;
-          }
-          searchEvents.push(
-            `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-          );
-        }
-        searchEvents.push(
-          `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
-          `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
-        );
+
+        const searchEvents = buildPopupSearchEvents(curCtl, {
+          courseCode: itemCourseCode,
+          year: itemYear,
+          classDesc: curCtl.classDescInputId ? descVal : undefined,
+        });
 
         let fRes = await proxy({
           url: rs.contextUrl,
@@ -910,30 +1073,11 @@
             bookingAction,
             onStep,
           });
-          const retryCtl = rs.controls;
-          const retrySearchEvents = [];
-          if (retryCtl.courseInputId && itemCourseCode) {
-            retrySearchEvents.push(
-              `ComboBox_Change~E002Id~E004${retryCtl.courseInputId}~E005Value~E004${SAP.sapEscape(itemCourseCode)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
-          if (retryCtl.yearInputId) {
-            retrySearchEvents.push(
-              `ComboBox_Change~E002Id~E004${retryCtl.yearInputId}~E005Value~E004${SAP.sapEscape(itemYear)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
-          if (retryCtl.classDescInputId) {
-            let descVal = "";
-            const hint = extractClassSearchHint(item.className);
-            if (hint) descVal = `*${hint}*`;
-            retrySearchEvents.push(
-              `ComboBox_Change~E002Id~E004${retryCtl.classDescInputId}~E005Value~E004${SAP.sapEscape(descVal)}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`
-            );
-          }
-          retrySearchEvents.push(
-            `Button_Press~E002Id~E004${retryCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
-            `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
-          );
+          const retrySearchEvents = buildPopupSearchEvents(rs.controls, {
+            courseCode: itemCourseCode,
+            year: itemYear,
+            classDesc: rs.controls.classDescInputId ? descVal : undefined,
+          });
           fRes = await proxy({
             url: rs.contextUrl,
             method: "POST",
@@ -1005,50 +1149,35 @@
           return null;
         };
 
-        let matchedClass = findMatchedClass(fClasses);
+        const scrollAndFindInPopup = async (initialBody, initialClasses, preferStartIdx = null) => {
+          const directMatch = findMatchedClass(initialClasses);
+          if (directMatch) return directMatch;
 
-        // Fallback: If targeted hint did not find the target class, clear classDesc filter and re-search to see all classes
-        if (!matchedClass && curCtl.classDescInputId) {
-          const resetEvents = [
-            `ComboBox_Change~E002Id~E004${curCtl.classDescInputId}~E005Value~E004~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E005Delay~E004full~E003~E002~E003`,
-            `Button_Press~E002Id~E004${curCtl.searchBtnId || "WD0562"}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003`,
-            `Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004true~E003~E002ResponseData~E004delta~E003~E002~E003`
-          ];
-          const resetRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, resetEvents.join("~E001")) });
-          if (resetRes.ok && resetRes.body) {
-            rs.cookie = SAP.mergeCookies(rs.cookie, resetRes.setCookie);
-            rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(resetRes.body));
-            fClasses = SAP.parseRegistrationClasses(resetRes.body);
-            matchedClass = findMatchedClass(fClasses);
-          }
-        }
-
-        // If target class is not within the visible rows, scroll SAP popup in steps of 5 until found
-        if (!matchedClass) {
-          const scheduleTableId = rs.controls.scheduleTableId || "WD0592";
-          const crcMatch = (fRes.body && fRes.body.match(new RegExp(`id="${scheduleTableId}"[^>]*crc="(\\d+)"`, "i"))) ||
-            (fRes.body && fRes.body.match(/crc="(\d+)"/i));
-          const totalRowCount = crcMatch ? parseInt(crcMatch[1], 10) : 120;
-          const maxTarget = totalRowCount > 0 ? totalRowCount : 120;
-
-          const initialTarget = (typeof item.firstVisibleIndex === "number" && item.firstVisibleIndex > 0)
-            ? item.firstVisibleIndex
-            : null;
+          if (!initialClasses || initialClasses.length === 0) return null;
+          const activeTbl = (initialClasses[0] && initialClasses[0].tableId) || rs.controls.scheduleTableId || "WD0592";
+          const rowCount = extractScheduleRowCount(initialBody, activeTbl);
+          if (rowCount === 0 || (rowCount !== null && rowCount <= initialClasses.length)) return null;
+          const maxTarget = rowCount && rowCount > 0 ? rowCount : 120;
 
           const scrollIndicesToTry = [];
-          if (initialTarget !== null) {
-            scrollIndicesToTry.push(initialTarget);
+          if (typeof preferStartIdx === "number" && preferStartIdx > 0) {
+            scrollIndicesToTry.push(preferStartIdx);
           }
-          for (let sIdx = 5; sIdx <= maxTarget; sIdx += 5) {
-            if (sIdx !== initialTarget) {
-              scrollIndicesToTry.push(sIdx);
-            }
+          for (let sIdx = 5; sIdx < maxTarget; sIdx += 5) {
+            if (sIdx !== preferStartIdx) scrollIndicesToTry.push(sIdx);
           }
+          if (preferStartIdx !== 0) {
+            scrollIndicesToTry.push(0);
+          }
+
+          let prevSignature = Array.isArray(initialClasses)
+            ? initialClasses.map((c) => `${c.className}|${c.startDate}|${c.rowIndex}`).join("||")
+            : "";
 
           for (const scrollIdx of scrollIndicesToTry) {
             onStep && onStep(`Locating "${item.className}" in SAP popup (scrolling to row ${scrollIdx})…`);
             const scrollQ =
-              `SapTable_VerticalScroll~E002Id~E004${scheduleTableId}~E005FirstVisibleItemIndex~E004${scrollIdx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
+              `SapTable_VerticalScroll~E002Id~E004${activeTbl}~E005FirstVisibleItemIndex~E004${scrollIdx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
               `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
 
             const scRes = await proxy({
@@ -1057,20 +1186,66 @@
               cookie: rs.cookie,
               body: postRegBody(rs.secureId, scrollQ),
             });
+            if (!scRes.ok || !scRes.body) break;
+            rs.cookie = SAP.mergeCookies(rs.cookie, scRes.setCookie);
+            rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(scRes.body));
+            const scrolledClasses = SAP.parseRegistrationClasses(scRes.body);
+            const found = findMatchedClass(scrolledClasses);
+            if (found) return found;
 
-            if (scRes.ok && scRes.body) {
-              rs.cookie = SAP.mergeCookies(rs.cookie, scRes.setCookie);
-              rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(scRes.body));
-              const scrolledClasses = SAP.parseRegistrationClasses(scRes.body);
-              matchedClass = findMatchedClass(scrolledClasses);
-              if (matchedClass) {
-                break;
-              }
-              if (!scrolledClasses || scrolledClasses.length === 0) {
-                break;
-              }
-            } else {
+            const sig = scrolledClasses.map((c) => `${c.className}|${c.startDate}|${c.rowIndex}`).join("||");
+            if (scrollIdx > 0 && (scrolledClasses.length === 0 || (sig && sig === prevSignature))) {
               break;
+            }
+            if (sig) prevSignature = sig;
+          }
+          return null;
+        };
+
+        // Phase 1: Search & scroll WITH targeted class description filter intact (e.g. *Beg C*)
+        let matchedClass = await scrollAndFindInPopup(fRes.body, fClasses, item.firstVisibleIndex);
+
+        // Phase 2: If targeted hint didn't find the class even after scrolling, clear classDesc filter & scroll ALL classes
+        if (!matchedClass && descVal && rs.controls.classDescInputId) {
+          onStep && onStep(`Expanding SAP class filter for "${item.className}"…`);
+          const resetEvents = buildPopupSearchEvents(rs.controls, {
+            courseCode: itemCourseCode,
+            year: itemYear,
+            classDesc: "",
+          });
+          const resetRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, resetEvents.join("~E001")) });
+          if (resetRes.ok && resetRes.body) {
+            rs.cookie = SAP.mergeCookies(rs.cookie, resetRes.setCookie);
+            rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(resetRes.body));
+            const resetClasses = SAP.parseRegistrationClasses(resetRes.body);
+            matchedClass = await scrollAndFindInPopup(resetRes.body, resetClasses, null);
+          }
+        }
+
+        // Phase 3: Alternate-year safety fallback (e.g. if SAP stores Jan-Aug 2027 terms under Academic Year 2026 or vice versa)
+        if (!matchedClass && rs.controls.yearInputId) {
+          const yrNum = parseInt(itemYear, 10);
+          const candidateAltYears = Array.from(new Set([
+            year && year !== itemYear ? year : "",
+            itemStartDateYear && itemStartDateYear !== itemYear ? itemStartDateYear : "",
+            !isNaN(yrNum) ? String(yrNum - 1) : "",
+            !isNaN(yrNum) ? String(yrNum + 1) : "",
+          ])).filter((y) => y && y !== itemYear);
+
+          for (const altYr of candidateAltYears) {
+            onStep && onStep(`Checking SAP schedules under year ${altYr} for "${item.className}"…`);
+            const altEvents = buildPopupSearchEvents(rs.controls, {
+              courseCode: itemCourseCode,
+              year: altYr,
+              classDesc: rs.controls.classDescInputId ? "" : undefined,
+            });
+            const altRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, altEvents.join("~E001")) });
+            if (altRes.ok && altRes.body) {
+              rs.cookie = SAP.mergeCookies(rs.cookie, altRes.setCookie);
+              rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(altRes.body));
+              const altClasses = SAP.parseRegistrationClasses(altRes.body);
+              matchedClass = await scrollAndFindInPopup(altRes.body, altClasses, null);
+              if (matchedClass) break;
             }
           }
         }
@@ -1121,15 +1296,23 @@
         }
         rs.cookie = SAP.mergeCookies(rs.cookie, okRes.setCookie);
         rs.popupOpen = false;
+        recordClassIdsFromXml(okRes.body, item);
 
         const okMsgs = SAP.parseSapMessages(okRes.body);
         if (okMsgs.some((m) => m.type === "ERROR")) {
+          const enrichedOkMsgs = okMsgs.map((m) => ({
+            ...m,
+            resolvedClassItem: m.type === "ERROR" ? item : null,
+          }));
           await releaseRegistrationSession(onStep);
           return {
             ok: false,
-            messages: okMsgs,
+            messages: enrichedOkMsgs,
             classItem: item,
+            failedClassItem: item,
+            failedIndex: idx,
             classItems: itemsToBook,
+            sapClassIdMap,
           };
         }
 
@@ -1148,6 +1331,7 @@
           if (sRes.ok && sRes.body) {
             rs.cookie = SAP.mergeCookies(rs.cookie, sRes.setCookie);
             rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(sRes.body));
+            recordClassIdsFromXml(sRes.body, item);
           }
 
           // If still a spacer fragment or uncheckedTacCheckboxIds is empty, request the fragment directly
@@ -1161,6 +1345,7 @@
             if (reqRes.ok && reqRes.body) {
               rs.cookie = SAP.mergeCookies(rs.cookie, reqRes.setCookie);
               rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(reqRes.body));
+              recordClassIdsFromXml(reqRes.body, item);
             }
           }
         }
@@ -1183,6 +1368,7 @@
         if (topRes.ok && topRes.body) {
           rs.cookie = SAP.mergeCookies(rs.cookie, topRes.setCookie);
           rs.controls = mergeRegControls(rs.controls, SAP.parseRegistrationControls(topRes.body));
+          recordClassIdsFromXml(topRes.body);
         }
         await checkAllUncheckedTac("Ensuring all Terms & Conditions (T&C) are accepted…");
       }
@@ -1431,12 +1617,29 @@
       }
 
       // Immediately release the SAP Registration session (press Back) so EZ_COURSE_REG is unlocked!
+      recordClassIdsFromXml(finalSaveRes && finalSaveRes.body);
+      // If Save failed mentioning an 8-digit SAP class ID that wasn't rendered in top viewport, hydrate LIST_VIEW fragments before Back
+      if (hasError && Object.keys(sapClassIdMap).length < itemsToBook.length) {
+        const regTableId = rs.controls.regListTableId || "WD5A";
+        const rowCount = Math.max(rs.controls.regRowCount || 0, itemsToBook.length);
+        const hydrateErrQ =
+          `SapTableCS_RequestData~E002Id~E004${regTableId}~E005DataFragments~E0040~002C${rowCount}~003B~E005FirstVisibleContentRowIndex~E0040~E005VisibleContentRowCount~E004${rowCount}~E003~E002ResponseData~E004delta~E005ClientAction~E004submitAsync~E003~E002~E003` +
+          `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004true~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+        const hErrRes = await proxy({ url: rs.contextUrl, method: "POST", cookie: rs.cookie, body: postRegBody(rs.secureId, hydrateErrQ) }).catch(() => null);
+        if (hErrRes && hErrRes.ok && hErrRes.body) {
+          recordClassIdsFromXml(hErrRes.body);
+        }
+      }
+      const resolvedFailure = hasError ? resolveFailedItem(messages) : null;
       await releaseRegistrationSession(onStep);
 
       return {
         ok: !hasError,
         messages,
-        classItem: firstItem,
+        classItem: (resolvedFailure && resolvedFailure.item) || firstItem,
+        failedClassItem: (resolvedFailure && resolvedFailure.item) || null,
+        failedSapObjectId: (resolvedFailure && resolvedFailure.sapId) || "",
+        sapClassIdMap,
         classItems: itemsToBook,
       };
     } catch (err) {
@@ -1491,13 +1694,13 @@
       onStep && onStep(stepHeader);
 
       // Ensure any leftover registration session is released before starting the new course group
-      await releaseRegistrationSession(onStep).catch(() => {});
+      await releaseRegistrationSession(onStep).catch(() => { });
 
-      // Determine year specifically for this group from its first item's start date
-      const groupStartYear = (grp.items[0].startDate && grp.items[0].startDate.match(/\b(20\d{2})\b/)?.[1])
-        || (grp.items[0].start && grp.items[0].start.match(/\b(20\d{2})\b/)?.[1])
-        || grp.items[0].year
-        || opts.year;
+      // Prioritize SAP PERYR_E (grp.items[0].year) or opts.year over calendar year in startDate
+      const groupStartYear = grp.items[0].year
+        || opts.year
+        || (grp.items[0].startDate && grp.items[0].startDate.match(/\b(20\d{2})\b/)?.[1])
+        || (grp.items[0].start && grp.items[0].start.match(/\b(20\d{2})\b/)?.[1]);
 
       const grpRes = await _bookSingleGroupInSap({
         ...opts,
@@ -1517,7 +1720,10 @@
         return {
           ok: false,
           messages: allMessages,
-          classItem: grp.items[0],
+          classItem: grpRes.failedClassItem || grpRes.classItem || grp.items[0],
+          failedClassItem: grpRes.failedClassItem || grpRes.classItem || null,
+          failedSapObjectId: grpRes.failedSapObjectId || "",
+          sapClassIdMap: grpRes.sapClassIdMap || {},
           classItems: itemsToBook,
           bookedClasses: allBooked,
           failedGroup: grp,
@@ -1555,7 +1761,52 @@
 
     const regVdom = document.createElement("div");
     try {
-      const info = await obtainStudentRegistrationUrl(cleanId, onStep);
+      let info = null;
+      if (booking && booking.linkId) {
+        info = await withSapLock(async () => {
+          const curSess = getSession && getSession();
+          if (
+            curSess &&
+            curSess.contextUrl &&
+            curSess.secureId &&
+            curSess.currentStudentId === cleanId &&
+            curSess.screen === "HISTORY"
+          ) {
+            try {
+              onStep && onStep("Opening exact booking record in SAP (MODREGID)…");
+              const linkRes = await proxy({
+                url: curSess.contextUrl,
+                method: "POST",
+                cookie: curSess.cookie,
+                body: postBody(curSess.secureId, SAP.buildLinkActivateQueue(booking.linkId)),
+              });
+              if (linkRes.ok && linkRes.body && !linkRes.body.includes("SAMLRequest") && linkRes.sessionState !== "RELEASED") {
+                const linkUnesc = String(linkRes.body)
+                  .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                  .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+                const linkUrlM = linkUnesc.match(/"url"\s*:\s*"([^"]+)"/i);
+                if (linkUrlM) {
+                  clearSession();
+                  let redirectUrl = linkUrlM[1];
+                  if (redirectUrl.startsWith("/")) redirectUrl = `${SAP.SAP_ORIGIN}${redirectUrl}`;
+                  return {
+                    redirectUrl,
+                    cookie: SAP.mergeCookies(curSess.cookie, linkRes.setCookie),
+                    viaModRegId: /MODREGID=/i.test(redirectUrl),
+                  };
+                }
+              }
+            } catch (e) {
+              // Fall back cleanly to Registration URL flow
+            }
+          }
+          return null;
+        });
+      }
+      if (!info) {
+        info = await obtainStudentRegistrationUrl(cleanId, onStep);
+      }
+      const openedViaModRegId = Boolean(info && info.viaModRegId);
       let baseRegUrl = info.redirectUrl;
       let cookie = info.cookie;
 
@@ -1602,37 +1853,47 @@
         popupOpen: false,
       };
 
-      // Cancel any immediate Bundle/Package popup if SAP opened one on load
-      if (ctl.hasPackagePopup) {
-        const cancelBtn = ctl.cancelPopupBtn || "WDAA";
-        const canRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, SAP.buildButtonPressQueue(cancelBtn)) });
-        if (canRes.ok && canRes.body) {
-          cookie = SAP.mergeCookies(cookie, canRes.setCookie);
-          SAP.applySapDeltaUpdates(canRes.body, regVdom);
-          ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(canRes.body));
-          regSession.cookie = cookie;
-          regSession.controls = ctl;
+      const cancelAnyPackagePopup = async (xmlBody) => {
+        const hasPkg =
+          ctl.hasPackagePopup ||
+          (xmlBody &&
+            /Bundle\s*selection|Package\s*selection/i.test(xmlBody) &&
+            !/<control-update id="WDWL1_POP_CONT"><content><!\[CDATA\[<div id="WDWL1_POP_CONT"[^>]*><\/div>/i.test(xmlBody));
+        if (hasPkg) {
+          const cancelBtn = ctl.cancelPopupBtn || "WDAA";
+          const canRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, SAP.buildButtonPressQueue(cancelBtn)) });
+          if (canRes.ok && canRes.body) {
+            cookie = SAP.mergeCookies(cookie, canRes.setCookie);
+            SAP.applySapDeltaUpdates(canRes.body, regVdom);
+            ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(canRes.body));
+            regSession.cookie = cookie;
+            regSession.controls = ctl;
+          }
         }
-      }
+      };
 
-      // Switch to Registrations tab if SAP landed on Header data or if Registrations table not visible yet
-      const needsRegTab =
-        ctl.panelStackId &&
-        ctl.registrationsTabPanelId &&
-        (/header/i.test(ctl.activePanelTitle || "") || (!ctl.addReservationItemId && !ctl.bookingBtnId));
-      if (needsRegTab) {
-        const switchQ =
-          `PanelStack_Select~E002Id~E004${ctl.panelStackId}~E005PanelId~E004${ctl.registrationsTabPanelId}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
-          `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
-        const tabRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, switchQ) });
-        if (tabRes.ok && tabRes.body) {
-          cookie = SAP.mergeCookies(cookie, tabRes.setCookie);
-          SAP.applySapDeltaUpdates(tabRes.body, regVdom);
-          ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(tabRes.body));
-          regSession.cookie = cookie;
-          regSession.controls = ctl;
+      const ensureRegistrationsTabVisible = async () => {
+        const needsRegTab =
+          ctl.panelStackId &&
+          ctl.registrationsTabPanelId &&
+          (/header/i.test(ctl.activePanelTitle || "") || (!ctl.addReservationItemId && !ctl.bookingBtnId && !ctl.regListTableId));
+        if (needsRegTab) {
+          const switchQ =
+            `PanelStack_Select~E002Id~E004${ctl.panelStackId}~E005PanelId~E004${ctl.registrationsTabPanelId}~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
+            `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+          const tabRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, switchQ) });
+          if (tabRes.ok && tabRes.body) {
+            cookie = SAP.mergeCookies(cookie, tabRes.setCookie);
+            SAP.applySapDeltaUpdates(tabRes.body, regVdom);
+            ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(tabRes.body));
+            regSession.cookie = cookie;
+            regSession.controls = ctl;
+          }
         }
-      }
+      };
+
+      await cancelAnyPackagePopup(phRes.body);
+      await ensureRegistrationsTabVisible();
 
       const normCls = (s) => {
         let str = String(s || "");
@@ -1645,6 +1906,16 @@
         return str.replace(/\.{2,}$|…$/, "").replace(/[\s\-_/–—\(\):]+/g, "").toLowerCase();
       };
 
+      const hasLevelConflict = (aStr, bStr) => {
+        const aBeg = String(aStr || "").match(/\bbeg\s*([a-e])\b/i)?.[1]?.toLowerCase();
+        const bBeg = String(bStr || "").match(/\bbeg\s*([a-e])\b/i)?.[1]?.toLowerCase();
+        if (aBeg && bBeg && aBeg !== bBeg) return true;
+        const aCefr = String(aStr || "").match(/\b([abc][12]\.[12])\b/i)?.[1]?.toLowerCase();
+        const bCefr = String(bStr || "").match(/\b([abc][12]\.[12])\b/i)?.[1]?.toLowerCase();
+        if (aCefr && bCefr && aCefr !== bCefr) return true;
+        return false;
+      };
+
       const findMatchingRow = (rows) => {
         if (!Array.isArray(rows) || rows.length === 0) return null;
         if (!booking) return rows[0];
@@ -1653,93 +1924,133 @@
         const bStatus = String(booking.status || "").trim().toLowerCase();
         const bTerm = String(booking.session || "").match(/(?:Term|T)\s*(\d+)/i)?.[1] || "";
         const bMonYr = String(`${booking.className || ""} ${booking.courseDescription || ""}`).match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{2,4})\b/i);
+        const bActStart = String(booking.actualStartDate || "").trim();
 
-        // 1. Strong className prefix/substring match (SAP truncates long class names with "..." in table) + status
-        let best = rows.find((r) => {
+        let bestRow = null;
+        let bestScore = 0;
+        rows.forEach((r) => {
+          if (hasLevelConflict(booking.className, r.className)) return;
           const rCls = normCls(r.className);
-          const clsOk = rCls && bCls && (bCls.startsWith(rCls) || rCls.startsWith(bCls) || bCls.includes(rCls) || rCls.includes(bCls));
-          const stOk = !bStatus || !r.status || r.status.toLowerCase() === bStatus;
-          return clsOk && stOk;
-        });
-        if (best) return best;
+          const combined = `${r.courseAndSession || ""} ${r.course || ""} ${r.className || ""}`.toLowerCase();
+          let score = 0;
 
-        // 2. Class match without strict status
-        best = rows.find((r) => {
-          const rCls = normCls(r.className);
-          return rCls && bCls && (bCls.startsWith(rCls) || rCls.startsWith(bCls) || bCls.includes(rCls) || rCls.includes(bCls));
+          if (rCls && bCls) {
+            if (bCls === rCls) score += 120;
+            else if (bCls.startsWith(rCls) || rCls.startsWith(bCls)) score += 95;
+            else if (bCls.includes(rCls) || rCls.includes(bCls)) score += 70;
+          }
+          if (bActStart && r.startDate === bActStart) score += 45;
+          if (bStatus && r.status && r.status.toLowerCase() === bStatus) score += 25;
+          if (bCourse && combined.includes(bCourse)) score += 15;
+          const bCourseExact = (booking.courseCode || "").trim().toLowerCase();
+          const rCourseExact = (r.course || "").trim().toLowerCase();
+          if (bCourseExact && rCourseExact && (rCourseExact === bCourseExact || rCourseExact.includes(bCourseExact) || bCourseExact.includes(rCourseExact))) {
+            score += 35;
+          }
+          const bSrc = (booking.bookingSource || "").trim().toLowerCase();
+          const rSrc = (r.bookingSource || "").trim().toLowerCase();
+          if (bSrc && rSrc && bSrc === rSrc) score += 15;
+          if (openedViaModRegId && rows.length === 1) score += 50;
+          if (bTerm && new RegExp(`(?:term|t)\\s*${bTerm}\\b`, "i").test(combined)) score += 20;
+          if (bMonYr) {
+            const mon = bMonYr[1].toLowerCase();
+            const yr = bMonYr[2].length === 2 ? bMonYr[2] : bMonYr[2].slice(-2);
+            if (combined.includes(mon) && combined.includes(yr)) score += 20;
+          }
+          if (score > bestScore && score >= 50) {
+            bestScore = score;
+            bestRow = r;
+          }
         });
-        if (best) return best;
-
-        // 3. Course code + term/month match in courseAndSession or className
-        if (bCourse) {
-          best = rows.find((r) => {
-            const combined = `${r.courseAndSession || ""} ${r.className || ""}`.toLowerCase();
-            if (!combined.includes(bCourse)) return false;
-            if (bTerm && !new RegExp(`term\\s*${bTerm}\\b`, "i").test(combined)) return false;
-            if (bMonYr) {
-              const mon = bMonYr[1].toLowerCase();
-              const yr = bMonYr[2].length === 2 ? bMonYr[2] : bMonYr[2].slice(-2);
-              if (!combined.includes(mon) || !combined.includes(yr)) return false;
-            }
-            const stOk = !bStatus || !r.status || r.status.toLowerCase() === bStatus;
-            return stOk;
-          });
-          if (best) return best;
-        }
-        return null;
+        return bestRow;
       };
 
       const scanAndScrollForRow = async () => {
         let list = SAP.parseExistingRegistrationsList(regVdom);
         let found = findMatchingRow(list.rows);
-        const totalRows = Math.max(ctl.regRowCount || 0, list.rows.length);
-        const tblId = list.tableId || ctl.regListTableId || "WDDF";
-        // If not in initial viewport and SAP table has more rows (virtualized beyond 5 visible rows), scroll to locate it
-        if (!found && totalRows > 5 && tblId) {
-          const seenKeys = new Set(list.rows.map((r) => `${r.rowIndex}|${r.className}|${r.startDate}`));
-          const allSeenRows = [...list.rows];
-          for (let sIdx = 5; sIdx < Math.min(totalRows, 60); sIdx += 5) {
-            onStep && onStep(`Scanning SAP Registrations rows (${sIdx + 1}–${Math.min(sIdx + 5, totalRows)} of ${totalRows})…`);
-            const scrollQ =
-              `SapTable_VerticalScroll~E002Id~E004${tblId}~E005FirstVisibleItemIndex~E004${sIdx}~E005Action~E004DIRECT~E005CellId~E004~E005AccessType~E004SCROLLBAR~E005SelectionFollowFocus~E004false~E005Shift~E004false~E005Ctrl~E004false~E005Alt~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
-              `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
-            const sRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, scrollQ) });
+        let totalRows = Math.max(ctl.regRowCount || 0, list.rows.length);
+        const tblId = list.tableId || ctl.regListTableId || "WD5A";
+
+        // Hydrate lazy SapTableCS spacer rows (SAP only renders Row 1 until SapTableCS_RequestData is sent!)
+        const needsHydration =
+          Boolean(tblId) &&
+          (ctl.hasSpacerFragment || totalRows > list.rows.length || (!found && list.rows.length === 1));
+        if (needsHydration) {
+          const reqCount = Math.min(Math.max(totalRows, 15), 40);
+          onStep && onStep("Loading all active registration rows from SAP…");
+          const hydrateQ =
+            `SapTableCS_TableResize~E002Id~E004${tblId}~E005VisibleContentRowCount~E004${reqCount}~E003~E002ResponseData~E004delta~E005EnqueueCardinality~E004single~E003~E002~E003` +
+            `~E001SapTableCS_RequestData~E002Id~E004${tblId}~E005DataFragments~E0040~002C${reqCount}~003B~E005FirstVisibleContentRowIndex~E0040~E005VisibleContentRowCount~E004${reqCount}~E003~E002ResponseData~E004delta~E005ClientAction~E004submitAsync~E003~E002~E003` +
+            `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004true~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+          const hRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, hydrateQ) });
+          if (hRes.ok && hRes.body) {
+            cookie = SAP.mergeCookies(cookie, hRes.setCookie);
+            SAP.applySapDeltaUpdates(hRes.body, regVdom);
+            ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(hRes.body));
+            regSession.cookie = cookie;
+            regSession.controls = ctl;
+            list = SAP.parseExistingRegistrationsList(regVdom);
+            totalRows = Math.max(ctl.regRowCount || 0, list.rows.length);
+            found = findMatchingRow(list.rows);
+          }
+        }
+
+        // Paginate beyond 40 rows if student has huge history and row is still not loaded
+        if (!found && totalRows > list.rows.length && tblId) {
+          for (let offset = list.rows.length; offset < Math.min(totalRows, 80); offset += 20) {
+            onStep && onStep(`Loading SAP Registrations (${offset + 1}–${Math.min(offset + 20, totalRows)} of ${totalRows})…`);
+            const moreQ =
+              `SapTableCS_RequestData~E002Id~E004${tblId}~E005DataFragments~E004${offset}~002C20~003B~E005FirstVisibleContentRowIndex~E004${offset}~E005VisibleContentRowCount~E00420~E003~E002ResponseData~E004delta~E005ClientAction~E004submitAsync~E003~E002~E003` +
+              `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004true~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+            const sRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, moreQ) });
             if (!sRes.ok || !sRes.body) break;
             cookie = SAP.mergeCookies(cookie, sRes.setCookie);
             SAP.applySapDeltaUpdates(sRes.body, regVdom);
             ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(sRes.body));
             regSession.cookie = cookie;
             regSession.controls = ctl;
-
-            const stepList = SAP.parseExistingRegistrationsList(sRes.body);
-            const activeRows = stepList.rows.length ? stepList.rows : SAP.parseExistingRegistrationsList(regVdom).rows;
-            let added = 0;
-            activeRows.forEach((r) => {
-              const k = `${r.rowIndex}|${r.className}|${r.startDate}`;
-              if (!seenKeys.has(k)) {
-                seenKeys.add(k);
-                allSeenRows.push(r);
-                added++;
-              }
-            });
-            found = findMatchingRow(activeRows) || findMatchingRow(allSeenRows);
-            if (found || added === 0) break;
+            const nextList = SAP.parseExistingRegistrationsList(regVdom);
+            const grew = nextList.rows.length > list.rows.length;
+            list = nextList;
+            found = findMatchingRow(list.rows);
+            if (found || !grew) break;
           }
-          list = { tableId: tblId, rows: allSeenRows };
         }
         return { list, found };
       };
 
       let { list: regList, found: matchedRow } = await scanAndScrollForRow();
 
-      // If no matching row yet and booking belongs to a specific branch, switch Teaching Centre combo
+      // If no matching row yet, switch Teaching Centre combo across matching/available centres
       if (!matchedRow && booking && ctl.centreComboId) {
-        const targetCentreKey = deduceCentreKeyFromClassOrBranch(
-          `${booking.className || ""} ${booking.courseCode || ""} ${booking.teachingCentre || ""}`,
-          ""
-        );
-        if (targetCentreKey) {
-          const sapCentreKey = String(targetCentreKey).split("_")[0];
+        const bookingText = `${booking.className || ""} ${booking.courseCode || ""} ${booking.teachingCentre || ""}`.trim();
+        const targetCentreKey = deduceCentreKeyFromClassOrBranch(bookingText, "");
+        const primaryKey = targetCentreKey ? String(targetCentreKey).split("_")[0] : "";
+        const availableOpts = Array.isArray(ctl.centreOptions) ? ctl.centreOptions : [];
+        const isEgOrOnline = /^(?:EG\b|Online\b)/i.test(bookingText) || /OLCons|Online|Phone\s*Consultation/i.test(bookingText);
+        const prioritizedOpts = availableOpts
+          .slice()
+          .sort((a, b) => {
+            const scoreOpt = (o) => {
+              const lbl = String(o.label || "");
+              let s = 0;
+              if (booking.teachingCentre && lbl.toLowerCase().includes(booking.teachingCentre.toLowerCase())) s += 100;
+              if (isEgOrOnline && /egypt|online|\beg\b/i.test(lbl)) s += 80;
+              if (/agouza|citystars|october|heliopolis|new\s*cairo|alex/i.test(lbl)) s += 10;
+              return s;
+            };
+            return scoreOpt(b) - scoreOpt(a);
+          })
+          .map((o) => o.key);
+
+        const candidateCentreKeys = [];
+        if (primaryKey) candidateCentreKeys.push(primaryKey);
+        prioritizedOpts.forEach((k) => {
+          if (k && !candidateCentreKeys.includes(k)) candidateCentreKeys.push(k);
+        });
+
+        for (let ci = 0; ci < candidateCentreKeys.length && ci < 7; ci++) {
+          const sapCentreKey = candidateCentreKeys[ci];
           const selCentreQ =
             `ComboBox_Select~E002Id~E004${ctl.centreComboId}~E005Key~E004${sapCentreKey}~E005ByEnter~E004false~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
             `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
@@ -1751,25 +2062,13 @@
             regSession.cookie = cookie;
             regSession.controls = ctl;
 
-            const hasPkg =
-              ctl.hasPackagePopup ||
-              (/Bundle\s*selection|Package\s*selection/i.test(cRes.body) &&
-                !/<control-update id="WDWL1_POP_CONT"><content><!\[CDATA\[<div id="WDWL1_POP_CONT"[^>]*><\/div>/i.test(cRes.body));
-            if (hasPkg) {
-              const cancelBtn = ctl.cancelPopupBtn || "WDAA";
-              const canRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, SAP.buildButtonPressQueue(cancelBtn)) });
-              if (canRes.ok && canRes.body) {
-                cookie = SAP.mergeCookies(cookie, canRes.setCookie);
-                SAP.applySapDeltaUpdates(canRes.body, regVdom);
-                ctl = mergeRegControls(ctl, SAP.parseRegistrationControls(canRes.body));
-                regSession.cookie = cookie;
-                regSession.controls = ctl;
-              }
-            }
+            await cancelAnyPackagePopup(cRes.body);
+            await ensureRegistrationsTabVisible();
 
             const rescan = await scanAndScrollForRow();
             regList = rescan.list;
             matchedRow = rescan.found;
+            if (matchedRow) break;
           }
         }
       }
@@ -1778,31 +2077,65 @@
       const preDetails = SAP.parseRegistrationDetailsPanel(regVdom);
       const preClsNorm = normCls(preDetails.courseDetails && preDetails.courseDetails.className);
       const targetClsNorm = normCls(matchedRow && matchedRow.className);
+      const preBegin = (preDetails.courseDetails && preDetails.courseDetails.begin) || "";
+      const beginMatches = !matchedRow || !matchedRow.startDate || !preBegin || preBegin === matchedRow.startDate;
+      const clsMatches =
+        !targetClsNorm || !preClsNorm || preClsNorm.startsWith(targetClsNorm) || targetClsNorm.startsWith(preClsNorm);
       const alreadyLoadedForRow =
         Boolean(matchedRow && matchedRow.selected) &&
-        Boolean(preDetails.courseDetails && preDetails.courseDetails.begin) &&
-        (!targetClsNorm || !preClsNorm || preClsNorm.startsWith(targetClsNorm) || targetClsNorm.startsWith(preClsNorm));
+        Boolean(preBegin) &&
+        beginMatches &&
+        clsMatches;
 
       if (matchedRow && !alreadyLoadedForRow && matchedRow.triggerCellId) {
         onStep && onStep("Reading selected registration row details in SAP…");
-        const tblId = matchedRow.tableId || regList.tableId || ctl.regListTableId || "WDDF";
-        const selRowQ =
-          `SapTable_ClientRowSelect~E002Id~E004${tblId}~E005RowIndex~E004${matchedRow.rowIndex}~E005RowUserData~E004~E005CellUserData~E004~E005AccessType~E004STANDARD~E005TriggerCellId~E004${matchedRow.triggerCellId}~E005TriggerAction~E004MOUSE~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
-          `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
-        const rowRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, selRowQ) });
-        if (rowRes.ok && rowRes.body) {
-          cookie = SAP.mergeCookies(cookie, rowRes.setCookie);
-          SAP.applySapDeltaUpdates(rowRes.body, regVdom);
-          regSession.cookie = cookie;
-          regList = SAP.parseExistingRegistrationsList(regVdom);
-          matchedRow = findMatchingRow(regList.rows) || matchedRow;
+        const tblId = matchedRow.tableId || regList.tableId || ctl.regListTableId || "WD5A";
+        const sendRowSelect = async (evtName) => {
+          const selRowQ =
+            `${evtName}~E002Id~E004${tblId}~E005RowIndex~E004${matchedRow.rowIndex}~E005RowUserData~E004~E005CellUserData~E004~E005AccessType~E004STANDARD~E005TriggerCellId~E004${matchedRow.triggerCellId}~E005TriggerAction~E004MOUSE~E003~E002ResponseData~E004delta~E005ClientAction~E004submit~E003~E002~E003` +
+            `~E001Form_Request~E002Id~E004sap.client.SsrClient.form~E005Async~E004false~E005FocusInfo~E004~E005Hash~E004~E005DomChanged~E004false~E005IsDirty~E004false~E003~E002ResponseData~E004delta~E003~E002~E003`;
+          const rowRes = await proxy({ url: contextUrl, method: "POST", cookie, body: postRegBody(secureId, selRowQ) });
+          if (rowRes.ok && rowRes.body) {
+            cookie = SAP.mergeCookies(cookie, rowRes.setCookie);
+            SAP.applySapDeltaUpdates(rowRes.body, regVdom);
+            regSession.cookie = cookie;
+            regList = SAP.parseExistingRegistrationsList(regVdom);
+            matchedRow = findMatchingRow(regList.rows) || matchedRow;
+          }
+        };
+
+        await sendRowSelect("SapTableCS_ClientRowSelect");
+        const postDetails = SAP.parseRegistrationDetailsPanel(regVdom);
+        const postBegin = (postDetails.courseDetails && postDetails.courseDetails.begin) || "";
+        const postClsNorm = normCls(postDetails.courseDetails && postDetails.courseDetails.className);
+        if (
+          (matchedRow.startDate && postBegin && postBegin !== matchedRow.startDate) ||
+          (targetClsNorm && postClsNorm && !postClsNorm.startsWith(targetClsNorm) && !targetClsNorm.startsWith(postClsNorm))
+        ) {
+          await sendRowSelect("SapTable_ClientRowSelect");
         }
       }
 
       const details = SAP.parseRegistrationDetailsPanel(regVdom);
+      if (matchedRow && details.courseDetails) {
+        if (!details.courseDetails.course && matchedRow.course) details.courseDetails.course = matchedRow.course;
+        if (!details.courseDetails.year && matchedRow.year) details.courseDetails.year = matchedRow.year;
+        if (!details.courseDetails.period && matchedRow.period) details.courseDetails.period = matchedRow.period;
+        if (!details.courseDetails.origin && matchedRow.bookingSource) details.courseDetails.origin = matchedRow.bookingSource;
+        if (!details.courseDetails.status && matchedRow.status) details.courseDetails.status = matchedRow.status;
+        if (!details.courseDetails.className && matchedRow.className) details.courseDetails.className = matchedRow.className;
+        if (!details.courseDetails.begin && matchedRow.startDate) details.courseDetails.begin = matchedRow.startDate;
+        if (!details.courseDetails.end && matchedRow.endDate) details.courseDetails.end = matchedRow.endDate;
+      }
+      const hasPanelData = Boolean(
+        openedViaModRegId &&
+        details &&
+        details.courseDetails &&
+        (details.courseDetails.course || details.courseDetails.begin)
+      );
       return {
         ok: true,
-        foundInRegistrations: Boolean(matchedRow),
+        foundInRegistrations: Boolean(matchedRow || hasPanelData),
         matchedRow: matchedRow || null,
         registrations: regList.rows || [],
         details,

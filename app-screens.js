@@ -559,7 +559,7 @@
   // ==========================================================================
   // Registration Details Modal (SAP ZHER_WA_REGISTRATION read-only view)
   // ==========================================================================
-  function RegistrationDetailsModal({ booking, studentId, studentName, cachedResult, onDetailsLoaded, onRebook, onClose }) {
+  function RegistrationDetailsModal({ booking, studentId, studentName, cachedResult, onDetailsLoaded, onSelectRow, onRebook, onClose }) {
     const [loading, setLoading] = useState(!cachedResult);
     const [step, setStep] = useState("");
     const [error, setError] = useState("");
@@ -579,6 +579,12 @@
         localStorage.setItem("sap_hub_time_format", next ? "12h" : "24h");
       } catch (_) { }
     };
+
+    useEffect(() => {
+      setLiveData(cachedResult || null);
+      setError("");
+      setLoading(!cachedResult);
+    }, [studentId, booking && booking.className, booking && booking.session, booking && booking.status, cachedResult]);
 
     async function loadFromSap() {
       if (!studentId || !booking || !Svc.fetchRegistrationRowDetails) return;
@@ -612,6 +618,11 @@
     const fmt12 = (SAPC && SAPC.formatClassTime12h) || ((x) => x);
     const fmt24 = (SAPC && SAPC.formatClassTime24h) || ((x) => x);
     const fmtClsTime = (str) => (use12Hour ? fmt12(str) : fmt24(str));
+    const fmtAmt = (val, cur = "") => {
+      if (val === undefined || val === null || val === "") return "—";
+      return SAPC && SAPC.formatSapAmount ? SAPC.formatSapAmount(val, cur) : (cur ? `${val} ${cur}` : val);
+    };
+    const isNegAmt = (val) => String(val || "").trim().endsWith("-") || String(val || "").trim().startsWith("-");
     const cleanVal = (v) => {
       let s = String(v || "").trim().replace(/\s*\bEmpty$/i, "").trim();
       s = s.replace(/(?:Object abbr\.|Academic Session \(Desc\.\)|Academic Year|Start Date|End Date|CancDate|User Name|Amount)\s*$/i, "").trim();
@@ -630,6 +641,7 @@
     const po = det.paymentOptions || {};
     const services = det.services || [];
     const regs = (liveData && liveData.registrations) || [];
+    const totalCurrency = it.currency || (services[0] && services[0].currency) || "EGP";
 
     const pickUntruncatedClass = (...cands) => {
       const valid = cands.map(cleanVal).filter(Boolean);
@@ -637,9 +649,9 @@
       return full || valid[0] || "—";
     };
 
-    const displayCourse = cleanVal(cd.course) || booking.courseCode || "—";
-    const displayYear = cleanVal(cd.year) || (String(booking.session || "").match(/\b(20\d{2})\b/)?.[1]) || "—";
-    const displayPeriod = cleanVal(cd.period) || dates.sessionName || "—";
+    const displayCourse = cleanVal(cd.course) || cleanVal(matched.course) || booking.courseCode || "—";
+    const displayYear = cleanVal(cd.year) || cleanVal(matched.year) || (String(booking.session || "").match(/\b(20\d{2})\b/)?.[1]) || "—";
+    const displayPeriod = cleanVal(cd.period) || cleanVal(matched.period) || dates.sessionName || "—";
     const displayOrigin = cleanVal(cd.origin) || cleanVal(matched.bookingSource) || booking.bookingSource || "—";
     const displayStatus = cleanVal(cd.status) || cleanVal(matched.status) || booking.status || "—";
     const rawClass = pickUntruncatedClass(booking.className, cd.className, matched.className, booking.courseDescription);
@@ -649,8 +661,12 @@
     const exactDays = schedInfo.daysText || "";
     const exactScheduleSummary = [exactDays, exactTimeRange].filter(Boolean).join(" · ");
 
-    const displayBegin = cleanVal(cd.begin) || cleanVal(matched.startDate) || dates.start || "";
-    const displayEnd = cleanVal(cd.end) || cleanVal(matched.endDate) || dates.end || "";
+    const liveBegin = cleanVal(cd.begin) || cleanVal(matched.startDate) || "";
+    const liveEnd = cleanVal(cd.end) || cleanVal(matched.endDate) || "";
+    const isCatalogPeriod = Boolean(dates.isAnnualPeriod || /permanent\s*offer/i.test(dates.sessionName || booking.session || ""));
+    const hasExactDates = Boolean(liveBegin || booking.actualStartDate || !isCatalogPeriod);
+    const displayBegin = liveBegin || cleanVal(booking.actualStartDate) || (hasExactDates ? dates.start : "") || "";
+    const displayEnd = liveEnd || cleanVal(booking.actualEndDate) || (hasExactDates ? dates.end : "") || "";
     const displayCancDate = cleanVal(cd.cancDate) || "";
     const displayReason = cleanVal(cd.reason) || "";
 
@@ -663,25 +679,26 @@
     const createdTimeRaw = cleanVal(ch.created && ch.created.time) || cleanVal(booking.bookingTime);
     const createdTime = createdTimeRaw ? fmtClsTime(createdTimeRaw) : "";
 
-    const fieldRow = (lbl, val, mono = false) => html`
+    const fieldRow = (lbl, val, mono = false, valueCls = "text-slate-900") => html`
       <div className="flex flex-col gap-0.5 bg-slate-50/80 border border-slate-200/80 rounded-[8px] px-2.5 py-1.5">
         <span className="text-[10.5px] font-semibold text-slate-500 uppercase tracking-wide">${lbl}</span>
-        <span className=${`text-[12.5px] font-semibold text-slate-900 ${mono ? "num font-mono" : ""}`}>${val || "—"}</span>
+        <span className=${`text-[12.5px] font-semibold ${valueCls} ${mono ? "num font-mono" : ""}`}>${val || "—"}</span>
       </div>`;
 
     return html`<div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs grid place-items-center z-[75] p-4" onClick=${onClose}>
-      <div className="card w-full max-w-[820px] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden bg-white" onClick=${(e) => e.stopPropagation()}>
-        <div className="px-5 py-3.5 border-b flex items-center justify-between gap-3 bg-slate-50/70" style=${{ borderColor: "var(--line)" }}>
+      <div className="card modal-pop w-full max-w-[840px] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden bg-white" onClick=${(e) => e.stopPropagation()}>
+        <div className="px-5 py-3.5 border-b flex items-center justify-between gap-3 bg-gradient-to-r from-slate-50 to-blue-50/40" style=${{ borderColor: "var(--line)" }}>
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-lg grid place-items-center shrink-0" style=${{ background: "var(--bc-blue-50)", color: "var(--bc-blue)" }}>
+            <div className="w-9 h-9 rounded-lg grid place-items-center shrink-0 shadow-xs" style=${{ background: "var(--bc-blue)", color: "#fff" }}>
               <${Icon} name="calendar" size=${18} />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-bold text-[15px] truncate" style=${{ color: "var(--bc-navy)" }}>
-                  Registration Details · ${fmtClsTime(booking.courseDescription || booking.courseCode)}
+                  Registration Details · ${fmtClsTime(booking.courseDescription || booking.courseCode || displayCourse)}
                 </span>
                 <${Pill} tone=${bookingStatusTone(displayStatus)}>${displayStatus}</${Pill}>
+                ${hasLiveMatch && html`<span className="pill pill-green !text-[10px] font-semibold">Live SAP Verified</span>`}
               </div>
               <div className="text-[11.5px] muted truncate">
                 ${studentName ? `${studentName} · ` : ""}ID ${studentId} · ${displayClass}
@@ -717,9 +734,9 @@
 
         <div className="p-4 overflow-y-auto scroll-thin space-y-3.5 text-[12px]">
           ${loading && html`
-            <div className="rounded-[8px] px-3 py-2 bg-blue-50 border border-blue-200 text-blue-900 flex items-center gap-2">
-              <${Icon} name="refresh" size=${14} className="animate-spin shrink-0" />
-              <span>${step || "Loading live registration details from SAP (read-only)…"}</span>
+            <div className="rounded-[9px] px-3 py-2 bg-blue-50 border border-blue-200 text-blue-900 flex items-center gap-2">
+              <${Icon} name="refresh" size=${14} className="animate-spin shrink-0 text-blue-600" />
+              <span className="font-medium">${step || "Reading live registration details from SAP (read-only)…"}</span>
             </div>
           `}
 
@@ -736,7 +753,39 @@
           ${liveData && !liveData.foundInRegistrations && !loading && html`
             <div className="rounded-[8px] px-3 py-2 bg-slate-50 border border-slate-200 text-slate-700 flex items-center gap-2 text-[11.5px]">
               <${Icon} name="info" size=${14} className="text-blue-600 shrink-0" />
-              <span>This booking is not listed in the active SAP Registrations table (or was archived). Showing aligned Booking History schedule dates below.</span>
+              <span>This booking is not listed in the active SAP Registrations table (or was archived). Showing Booking History info below.</span>
+            </div>
+          `}
+
+          <!-- Schedule Summary Hero -->
+          ${(exactScheduleSummary || displayBegin || dates.start || booking.bookingDate) && html`
+            <div className="rounded-[10px] bg-gradient-to-r from-blue-50/90 to-indigo-50/70 border border-blue-200 px-3.5 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-blue-800 bg-blue-100/90 px-2 py-0.5 rounded">
+                  Class Schedule (${use12Hour ? "12h" : "24h"})
+                </span>
+                <span className="text-[13.5px] font-bold text-slate-900 select-text">
+                  ${exactScheduleSummary || displayClass}
+                </span>
+                ${schedInfo.termText && html`<span className="pill pill-amber !text-[10.5px] font-bold font-mono">${schedInfo.termText}</span>`}
+                ${booking.bookingDate && html`
+                  <span className="pill pill-slate !text-[10.5px] font-medium">
+                    Booked: ${fmtDate(booking.bookingDate)}
+                  </span>
+                `}
+              </div>
+              <div className="text-right">
+                <div className="text-[12.5px] font-mono font-bold text-blue-950 num whitespace-nowrap">
+                  ${displayBegin || displayEnd
+                    ? `${displayBegin ? fmtDate(displayBegin) : "—"} → ${displayEnd ? fmtDate(displayEnd) : "—"}`
+                    : "Attendance dates pending SAP"}
+                </div>
+                ${!hasExactDates && !loading && html`
+                  <div className="text-[10px] text-amber-700 font-medium">
+                    Catalog Period: ${dates.start ? fmtDate(dates.start) : "—"} → ${dates.end ? fmtDate(dates.end) : "—"} (click Refresh SAP for exact attendance dates)
+                  </div>
+                `}
+              </div>
             </div>
           `}
 
@@ -747,7 +796,7 @@
                 <${Icon} name="cap" size=${15} className="muted" />
                 <span>Course details</span>
               </div>
-              ${liveData && liveData.foundInRegistrations && html`
+              ${hasLiveMatch && html`
                 <span className="pill pill-green !text-[10.5px] font-semibold">Live from SAP Registration</span>
               `}
             </div>
@@ -766,22 +815,6 @@
               ${fieldRow("End", displayEnd ? fmtDate(displayEnd) : "—", true)}
               ${fieldRow("Canc.Date", displayCancDate ? fmtDate(displayCancDate) : "—", true)}
             </div>
-            ${(exactScheduleSummary || displayBegin) && html`
-              <div className="rounded-[9px] bg-blue-50/75 border border-blue-200 px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[10.5px] font-bold uppercase tracking-wider text-blue-800 bg-blue-100 px-2 py-0.5 rounded">
-                    Class Schedule (${use12Hour ? "12h" : "24h"})
-                  </span>
-                  <span className="text-[13px] font-bold text-slate-900 select-text">
-                    ${exactScheduleSummary || displayClass}
-                  </span>
-                  ${schedInfo.termText && html`<span className="pill pill-amber !text-[10px] font-bold font-mono">${schedInfo.termText}</span>`}
-                </div>
-                <div className="text-[12px] font-mono font-semibold text-blue-950 num whitespace-nowrap">
-                  ${displayBegin ? fmtDate(displayBegin) : "—"} → ${displayEnd ? fmtDate(displayEnd) : "—"}
-                </div>
-              </div>
-            `}
             ${(displayReason || (dates.periodStart && displayBegin && dates.periodStart !== displayBegin)) && html`
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 ${displayReason && fieldRow("Reason", displayReason)}
@@ -848,12 +881,12 @@
                       ${services.map((sv, idx) => html`
                         <tr key=${idx}>
                           <td>${sv.serviceDescription || "Course Fee"}</td>
-                          <td className="num">${sv.fee || "—"}</td>
-                          <td className="num">${sv.discount || "0,00"}</td>
-                          <td className="num">${sv.discountedFee || "—"}</td>
-                          <td className="num font-semibold">${sv.payableAmount || "—"}</td>
-                          <td className="font-mono">${sv.currency || "EGP"}</td>
-                          <td className="num">${sv.sponsoredPct || "0,00"}</td>
+                          <td className="num">${fmtAmt(sv.fee)}</td>
+                          <td className=${`num font-medium ${isNegAmt(sv.discount) ? "text-emerald-700" : ""}`}>${fmtAmt(sv.discount)}</td>
+                          <td className="num">${fmtAmt(sv.discountedFee)}</td>
+                          <td className="num font-semibold text-[#092b57]">${fmtAmt(sv.payableAmount)}</td>
+                          <td className="font-mono">${sv.currency || totalCurrency}</td>
+                          <td className="num">${sv.sponsoredPct ? `${fmtAmt(sv.sponsoredPct)}%` : "0%"}</td>
                           <td>${sv.cancelled === "Yes" ? html`<span className="pill pill-red !text-[10px]">Cancelled</span>` : "No"}</td>
                         </tr>
                       `)}
@@ -863,9 +896,9 @@
               `}
               ${(it.payableAmount || it.discountAmount || it.totalAmount) && html`
                 <div className="grid grid-cols-3 gap-2">
-                  ${fieldRow("Item Payable Amount", it.payableAmount || "0,00", true)}
-                  ${fieldRow("Discount Amount", it.discountAmount || "0,00", true)}
-                  ${fieldRow("Total Amount", it.totalAmount || "0,00", true)}
+                  ${fieldRow("Item Payable Amount", fmtAmt(it.payableAmount, totalCurrency), true)}
+                  ${fieldRow("Discount Amount", fmtAmt(it.discountAmount || "0", totalCurrency), true, isNegAmt(it.discountAmount) ? "text-emerald-700" : "text-slate-900")}
+                  ${fieldRow("Total Amount", fmtAmt(it.totalAmount, totalCurrency), true, "text-[#092b57]")}
                 </div>
               `}
             </div>
@@ -873,7 +906,10 @@
 
           ${regs.length > 1 && html`
             <div className="rounded-[10px] border p-3 space-y-2" style=${{ borderColor: "var(--line)" }}>
-              <div className="font-bold text-[12.5px] text-slate-700">All Registrations in Active SAP Table (${regs.length})</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-bold text-[12.5px] text-slate-700">All Registrations in Active SAP Table (${regs.length})</div>
+                ${onSelectRow && html`<span className="text-[10.5px] muted">Click a row to inspect</span>`}
+              </div>
               <div className="overflow-x-auto border rounded-[8px]" style=${{ borderColor: "var(--line)" }}>
                 <table className="tbl tbl-compact">
                   <thead>
@@ -887,7 +923,12 @@
                   </thead>
                   <tbody>
                     ${regs.map((r, i) => html`
-                      <tr key=${i} style=${r.selected ? { background: "var(--bc-blue-50)" } : null}>
+                      <tr
+                        key=${i}
+                        onClick=${() => onSelectRow && !r.selected && onSelectRow(r)}
+                        className=${onSelectRow && !r.selected ? "cursor-pointer hover:bg-blue-50/70 transition-colors" : ""}
+                        style=${r.selected ? { background: "var(--bc-blue-50)" } : null}
+                      >
                         <td className="font-medium">${r.courseAndSession || "—"}</td>
                         <td>${fmtClsTime(r.className || "—")}</td>
                         <td><${Pill} tone=${bookingStatusTone(r.status)}>${r.status || "—"}</${Pill}></td>

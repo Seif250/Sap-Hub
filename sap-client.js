@@ -301,11 +301,31 @@
         const temp = document.createElement("div");
         temp.innerHTML = htmlContent;
         if (isPartial) {
-          // If this is a PARTIAL table fragment update, append new rows instead of replacing existing table
+          // If this is a PARTIAL SapTableCS fragment update, merge/replace rows cleanly by ID (preserving hpm="left"/"none")
+          const newTbodies = Array.from(temp.querySelectorAll("tbody"));
           const newRows = Array.from(temp.querySelectorAll("tr"));
           if (newRows.length > 0) {
-            const tbody = existing.querySelector("tbody") || existing;
-            newRows.forEach((tr) => tbody.appendChild(tr));
+            newRows.forEach((tr) => {
+              const rId = tr.getAttribute("id");
+              if (rId) {
+                const prevRow = vdomContainer.querySelector(`[id="${CSS.escape(rId)}"]`);
+                if (prevRow) {
+                  prevRow.replaceWith(tr);
+                  return;
+                }
+              }
+              const hpm = (tr.parentElement && tr.parentElement.getAttribute("hpm")) || "";
+              const targetTbody =
+                (hpm && existing.querySelector(`tbody[hpm="${hpm}"]`)) ||
+                (rId && rId.includes("-mrss-cont-left-") && existing.querySelector(`[id$="-mrss-cont-left-content"] tbody`)) ||
+                (rId && rId.includes("-mrss-cont-none-") && existing.querySelector(`[id$="-mrss-cont-none-content"] tbody`)) ||
+                existing.querySelector(`[id$="-mrss-cont-none-content"] tbody`) ||
+                existing.querySelector("tbody") ||
+                existing;
+              targetTbody.appendChild(tr);
+            });
+          } else if (newTbodies.length > 0) {
+            newTbodies.forEach((tb) => existing.appendChild(tb));
           } else {
             existing.appendChild(temp.firstElementChild || temp);
           }
@@ -1078,6 +1098,11 @@
           return "";
         }
 
+        const linkM =
+          chunk.match(/<a[^>]*\bid="(WD[0-9A-F]+)"[^>]*\bct="LN"[^>]*>/i) ||
+          chunk.match(/<a[^>]*\bct="LN"[^>]*\bid="(WD[0-9A-F]+)"[^>]*>/i) ||
+          chunk.match(/<a[^>]*\bid="(WD[0-9A-F]+)"[^>]*>/i);
+        const linkId = (linkM && linkM[1]) || "";
         const courseCode = getHint("E_SHORT_FPM_CE") || getHint("SM_SHORT_FPM_CE");
         const courseDescription = getHint("SM_STEXT_FPM_CE");
         const classTitle = getHint("E_SHORT_FPM_CE") || courseCode;
@@ -1116,6 +1141,7 @@
               bookingTime,
               actualStartDate: classStart || "",
               actualEndDate: classEnd || "",
+              linkId,
             });
           }
         }
@@ -1173,6 +1199,8 @@
             const status = tds[9] || "";
             const bookingDate = tds[10] || "";
             const bookingTime = tds[11] || "";
+            const linkEl = tr.querySelector('a[id^="WD"][ct="LN"], a[id^="WD"]');
+            const linkId = (linkEl && linkEl.getAttribute("id")) || "";
 
             if (!courseCode && !courseDescription && !session) return;
             const key = `${courseCode}|${classTitle}|${className}|${session}|${status}|${bookingDate}|${bookingTime}`;
@@ -1191,6 +1219,7 @@
                 status,
                 bookingDate,
                 bookingTime,
+                linkId,
               });
             }
           });
